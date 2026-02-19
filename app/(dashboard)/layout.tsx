@@ -11,13 +11,14 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const router = useRouter()
 
   useEffect(() => {
-    if (!isAuthenticated) {
-      router.push("/")
-    }
+    if (!isAuthenticated) router.replace("/") // push -> replace
   }, [isAuthenticated, router])
 
-  if (!isAuthenticated) return null
-
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-background" />
+    )
+  }
   return (
     <div className="flex min-h-screen bg-background">
       <AppSidebar />

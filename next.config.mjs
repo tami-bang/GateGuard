@@ -1,11 +1,11 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  typescript: {
-    ignoreBuildErrors: true,
+  experimental: {
+    allowedDevOrigins: [
+      "http://localhost:3000",
+      "http://192.168.1.128:3000",
+    ],
   },
-  images: {
-    unoptimized: true,
-  },
-}
+};
 
 export default nextConfig
