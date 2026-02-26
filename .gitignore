@@ -43,3 +43,15 @@ scripts/logs/
 _junk/
 **/_junk/
 *.tmp
+
+# Engine artifacts / stray files
+engine_C/Accept*
+engine_C/FROM*
+engine_C/GET*
+engine_C/Host*
+engine_C/ORDER*
+engine_C/SELECT*
+engine_C/User-Agent*
+
+# FastAPI stray file
+fastapi/=
