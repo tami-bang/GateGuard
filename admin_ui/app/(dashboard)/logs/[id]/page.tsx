@@ -1,57 +1,91 @@
-"use client"
-
-import { use, useMemo, useState } from "react"
 import Link from "next/link"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { StatusChip } from "@/components/status-chip"
-import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from "@/components/ui/breadcrumb"
-import { ShieldAlert, FileText, Copy, Check, ArrowLeft, ExternalLink } from "lucide-react"
-import { mockAccessLogs, mockAIAnalyses, mockReviewEvents } from "@/lib/mock-data"
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbLink,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb"
+import { ShieldAlert, FileText, ArrowLeft, ExternalLink } from "lucide-react"
 
-export default function LogDetailPage({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = use(params)
-  const [copied, setCopied] = useState(false)
+import { apiGetLogDetail, type AIAnalysisItem } from "@/lib/api-client"
 
-  const log = useMemo(() => mockAccessLogs.find(l => l.log_id === id), [id])
-  const aiAnalyses = useMemo(() => mockAIAnalyses.filter(a => a.log_id === id).sort((a, b) => b.analysis_seq - a.analysis_seq), [id])
-  const latestAI = aiAnalyses[0] || null
-  const relatedIncident = useMemo(() => mockReviewEvents.find(r => r.log_id === id), [id])
+type LogDetailPageProps = { params: { id: string } }
+
+export default async function LogDetailPage({ params }: LogDetailPageProps) {
+  const logId = Number(params.id)
+  if (!Number.isFinite(logId)) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-4 py-20">
+        <p className="text-muted-foreground">Invalid log id</p>
+        <Link href="/logs">
+          <Button variant="outline" size="sm">
+            Back to Logs
+          </Button>
+        </Link>
+      </div>
+    )
+  }
+
+  // 통합본 패턴 (요구한 그대로)
+  let data: Awaited<ReturnType<typeof apiGetLogDetail>> | null = null
+  try {
+    data = await apiGetLogDetail(logId)
+  } catch {
+    data = null
+  }
+
+  const log = data?.log ?? null
+  const analyses: AIAnalysisItem[] = data?.analyses ?? []
+
+  const aiAnalyses = [...analyses].sort((a, b) => (b.analysis_seq ?? 0) - (a.analysis_seq ?? 0))
+  const latestAI = aiAnalyses[0] ?? null
 
   if (!log) {
     return (
       <div className="flex flex-col items-center justify-center gap-4 py-20">
         <p className="text-muted-foreground">Log entry not found</p>
-        <Link href="/logs"><Button variant="outline" size="sm">Back to Logs</Button></Link>
+        <Link href="/logs">
+          <Button variant="outline" size="sm">
+            Back to Logs
+          </Button>
+        </Link>
       </div>
     )
   }
 
-  function copySlackMessage() {
-    const msg = [
-      `*GateGuard Alert*`,
-      `Host: \`${log!.host}\``,
-      `Path: \`${log!.path}\``,
-      `Decision: ${log!.decision}`,
-      latestAI ? `AI Score: ${latestAI.score.toFixed(2)}` : "",
-      `Link: ${window.location.origin}/logs/${log!.log_id}`,
-    ].filter(Boolean).join("\n")
-    navigator.clipboard.writeText(msg)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
-  }
+  const injectAttempted = Number(log.inject_attempted ?? 0) > 0
+  const injectSent = Number(log.inject_send ?? 0) > 0
+
+  const clientAddr =
+    log.client_ip && log.client_port ? `${log.client_ip}:${log.client_port}` : log.client_ip || "N/A"
+  const serverAddr =
+    log.server_ip && log.server_port ? `${log.server_ip}:${log.server_port}` : log.server_ip || "N/A"
+
+  // View API 버튼에서 127.0.0.1 뜨는 문제 방지 (VM 기준 fallback)
+  const apiBase = (process.env.NEXT_PUBLIC_FASTAPI_BASE_URL || "http://192.168.1.24:8000").replace(/\/+$/, "")
 
   return (
     <div className="flex flex-col gap-4">
       <Breadcrumb>
         <BreadcrumbList>
-          <BreadcrumbItem><BreadcrumbLink href="/dashboard">Dashboard</BreadcrumbLink></BreadcrumbItem>
+          <BreadcrumbItem>
+            <BreadcrumbLink href="/dashboard">Dashboard</BreadcrumbLink>
+          </BreadcrumbItem>
           <BreadcrumbSeparator />
-          <BreadcrumbItem><BreadcrumbLink href="/logs">Logs</BreadcrumbLink></BreadcrumbItem>
+          <BreadcrumbItem>
+            <BreadcrumbLink href="/logs">Logs</BreadcrumbLink>
+          </BreadcrumbItem>
           <BreadcrumbSeparator />
-          <BreadcrumbItem><BreadcrumbPage>{id}</BreadcrumbPage></BreadcrumbItem>
+          <BreadcrumbItem>
+            <BreadcrumbPage>{String(logId)}</BreadcrumbPage>
+          </BreadcrumbItem>
         </BreadcrumbList>
       </Breadcrumb>
 
@@ -64,24 +98,28 @@ export default function LogDetailPage({ params }: { params: Promise<{ id: string
           </Link>
           <div>
             <h1 className="text-xl font-semibold text-foreground">Log Detail</h1>
-            <p className="font-mono text-xs text-muted-foreground">{id}</p>
+            <p className="font-mono text-xs text-muted-foreground">{String(log.request_id || logId)}</p>
           </div>
         </div>
+
         <div className="flex items-center gap-2">
           <Link href={`/incidents?create=${log.log_id}`}>
             <Button size="sm" className="h-8 gap-1.5 text-xs">
               <ShieldAlert className="size-3.5" /> Create Incident
             </Button>
           </Link>
+
           <Link href={`/policies/new?from_log=${log.log_id}`}>
             <Button variant="outline" size="sm" className="h-8 gap-1.5 text-xs">
               <FileText className="size-3.5" /> Create Policy
             </Button>
           </Link>
-          <Button variant="outline" size="sm" className="h-8 gap-1.5 text-xs" onClick={copySlackMessage}>
-            {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-            {copied ? "Copied" : "Copy Slack Message"}
-          </Button>
+
+          <a href={`${apiBase}/v1/logs/${log.log_id}`} target="_blank" rel="noreferrer">
+            <Button variant="outline" size="sm" className="h-8 gap-1.5 text-xs">
+              View API <ExternalLink className="size-3.5" />
+            </Button>
+          </a>
         </div>
       </div>
 
@@ -93,17 +131,24 @@ export default function LogDetailPage({ params }: { params: Promise<{ id: string
           </CardHeader>
           <CardContent>
             <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
-              <DetailRow label="Host" value={log.host} mono />
-              <DetailRow label="Path" value={log.path} mono />
-              <DetailRow label="Method"><Badge variant="outline" className="text-[11px]">{log.method}</Badge></DetailRow>
-              <DetailRow label="Timestamp" value={new Date(log.detect_timestamp).toLocaleString()} />
-              <DetailRow label="Client IP" value={`${log.client_ip}:${log.client_port}`} mono />
-              <DetailRow label="Server" value={`${log.server_ip}:${log.server_port}`} mono />
-              <DetailRow label="Request ID" value={log.request_id} mono />
-              <DetailRow label="URL Normalized" value={log.url_norm} mono />
+              <DetailRow label="Host" value={log.host || "N/A"} mono />
+              <DetailRow label="Path" value={log.path || "N/A"} mono />
+              <DetailRow label="Method">
+                <Badge variant="outline" className="text-[11px]">
+                  {log.method || "N/A"}
+                </Badge>
+              </DetailRow>
+              <DetailRow
+                label="Timestamp"
+                value={log.detect_timestamp ? new Date(log.detect_timestamp).toLocaleString() : "N/A"}
+              />
+              <DetailRow label="Client" value={clientAddr} mono />
+              <DetailRow label="Server" value={serverAddr} mono />
+              <DetailRow label="Request ID" value={log.request_id || "N/A"} mono />
+              <DetailRow label="URL Normalized" value={log.url_norm || "N/A"} mono />
               <div className="col-span-2">
                 <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">User Agent</dt>
-                <dd className="mt-0.5 text-xs font-mono text-foreground break-all">{log.user_agent}</dd>
+                <dd className="mt-0.5 text-xs font-mono text-foreground break-all">{log.user_agent || "N/A"}</dd>
               </div>
             </dl>
           </CardContent>
@@ -116,15 +161,35 @@ export default function LogDetailPage({ params }: { params: Promise<{ id: string
           </CardHeader>
           <CardContent>
             <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
-              <DetailRow label="Decision"><StatusChip value={log.decision} /></DetailRow>
-              <DetailRow label="Decision Stage"><StatusChip value={log.decision_stage} type="stage" /></DetailRow>
-              <DetailRow label="Reason" value={log.reason} />
+              <DetailRow label="Decision">
+                <StatusChip value={String(log.decision || "ERROR")} />
+              </DetailRow>
+              <DetailRow label="Decision Stage">
+                <StatusChip value={String(log.decision_stage || "FAIL_STAGE")} type="stage" />
+              </DetailRow>
+
+              <DetailRow label="Reason">
+                <StatusChip value={String(log.reason || "")} type="reason" />
+              </DetailRow>
+
               <DetailRow label="Matched Policy">
                 {log.policy_id ? (
-                  <Link href={`/policies/${log.policy_id}`} className="text-primary hover:underline text-xs font-mono">{log.policy_id}</Link>
-                ) : <span className="text-muted-foreground text-xs">N/A</span>}
+                  <Link href={`/policies/${log.policy_id}`} className="text-primary hover:underline text-xs font-mono">
+                    {String(log.policy_id)}
+                  </Link>
+                ) : (
+                  <span className="text-muted-foreground text-xs">N/A</span>
+                )}
               </DetailRow>
-              <DetailRow label="Engine Latency" value={`${log.engine_latency_ms}ms`} mono />
+              <DetailRow
+                label="Engine Latency"
+                value={
+                  log.engine_latency_ms !== null && log.engine_latency_ms !== undefined
+                    ? `${log.engine_latency_ms}ms`
+                    : "N/A"
+                }
+                mono
+              />
             </dl>
           </CardContent>
         </Card>
@@ -138,18 +203,26 @@ export default function LogDetailPage({ params }: { params: Promise<{ id: string
             {latestAI ? (
               <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
                 <DetailRow label="Score">
-                  <span className={`font-mono font-semibold ${latestAI.score >= 0.7 ? "text-red-600" : latestAI.score >= 0.5 ? "text-amber-600" : "text-emerald-600"}`}>
-                    {latestAI.score.toFixed(3)}
+                  <span className="font-mono font-semibold">
+                    {latestAI.score === null || latestAI.score === undefined ? "N/A" : Number(latestAI.score).toFixed(3)}
                   </span>
                 </DetailRow>
-                <DetailRow label="Label"><StatusChip value={latestAI.label} type="aiLabel" /></DetailRow>
-                <DetailRow label="Latency" value={`${latestAI.latency_ms}ms`} mono />
-                <DetailRow label="Model Version" value={latestAI.model_version} mono />
+                <DetailRow label="Label">
+                  <StatusChip value={String(latestAI.label || "UNKNOWN")} type="aiLabel" />
+                </DetailRow>
+                <DetailRow
+                  label="Latency"
+                  value={latestAI.latency_ms !== null && latestAI.latency_ms !== undefined ? `${latestAI.latency_ms}ms` : "N/A"}
+                  mono
+                />
+                <DetailRow label="Model Version" value={latestAI.model_version || "N/A"} mono />
                 <DetailRow label="Error Code" value={latestAI.error_code || "None"} />
-                <DetailRow label="Analysis Seq" value={String(latestAI.analysis_seq)} />
+                <DetailRow label="Analysis Seq" value={String(latestAI.analysis_seq ?? 0)} />
                 <div className="col-span-2">
                   <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider mb-1">AI Response</dt>
-                  <dd className="rounded-md bg-muted p-3 text-xs text-foreground leading-relaxed">{latestAI.ai_response}</dd>
+                  <dd className="rounded-md bg-muted p-3 text-xs text-foreground leading-relaxed break-all">
+                    {latestAI.ai_response || "N/A"}
+                  </dd>
                 </div>
               </dl>
             ) : (
@@ -166,28 +239,44 @@ export default function LogDetailPage({ params }: { params: Promise<{ id: string
           <CardContent>
             <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
               <DetailRow label="Inject Attempted">
-                <Badge variant={log.inject_attempted ? "destructive" : "secondary"} className="text-[11px]">
-                  {log.inject_attempted ? "Yes" : "No"}
+                <Badge variant={injectAttempted ? "destructive" : "secondary"} className="text-[11px]">
+                  {injectAttempted ? "Yes" : "No"}
                 </Badge>
               </DetailRow>
+
               <DetailRow label="Inject Sent">
-                <Badge variant={log.inject_send ? "destructive" : "secondary"} className="text-[11px]">
-                  {log.inject_send ? "Yes" : "No"}
+                <Badge variant={injectSent ? "destructive" : "secondary"} className="text-[11px]">
+                  {injectSent ? "Yes" : "No"}
                 </Badge>
               </DetailRow>
-              <DetailRow label="Inject Errno" value={log.inject_errno !== null ? `${log.inject_errno}` : "None"} mono />
-              <DetailRow label="Inject Latency" value={log.inject_latency_ms !== null ? `${log.inject_latency_ms}ms` : "N/A"} mono />
+
+              <DetailRow
+                label="Inject Errno"
+                value={log.inject_errno !== null && log.inject_errno !== undefined ? String(log.inject_errno) : "None"}
+                mono
+              />
+
+              <DetailRow
+                label="Inject Latency"
+                value={log.inject_latency_ms !== null && log.inject_latency_ms !== undefined ? `${log.inject_latency_ms}ms` : "N/A"}
+                mono
+              />
+
               <DetailRow label="Inject Status Code">
                 {log.inject_status_code ? (
-                  <Badge variant="outline" className="font-mono text-[11px]">{log.inject_status_code}</Badge>
-                ) : <span className="text-muted-foreground text-xs">N/A</span>}
+                  <Badge variant="outline" className="font-mono text-[11px]">
+                    {String(log.inject_status_code)}
+                  </Badge>
+                ) : (
+                  <span className="text-muted-foreground text-xs">N/A</span>
+                )}
               </DetailRow>
             </dl>
           </CardContent>
         </Card>
       </div>
 
-      {/* AI Analysis History (if multiple) */}
+      {/* AI Analysis History */}
       {aiAnalyses.length > 1 && (
         <Card className="border shadow-sm overflow-hidden">
           <CardHeader className="pb-2">
@@ -206,60 +295,52 @@ export default function LogDetailPage({ params }: { params: Promise<{ id: string
               </TableRow>
             </TableHeader>
             <TableBody>
-              {aiAnalyses.map(a => (
-                <TableRow key={a.ai_analysis_id} className="text-xs">
+              {aiAnalyses.map((a) => (
+                <TableRow
+                  key={`${a.analysis_seq}-${a.analyzed_at ?? ""}`}
+                  className="text-xs"
+                >
                   <TableCell className="font-mono text-[11px]">{a.analysis_seq}</TableCell>
                   <TableCell className="font-mono text-[11px] text-muted-foreground">
-                    {new Date(a.analyzed_at).toLocaleString("en-US", { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                    {a.analyzed_at ? new Date(a.analyzed_at).toLocaleString() : "N/A"}
+                  </TableCell>
+                  <TableCell className="font-mono text-[11px]">
+                    {a.score === null || a.score === undefined ? "N/A" : Number(a.score).toFixed(3)}
                   </TableCell>
                   <TableCell>
-                    <span className={`font-mono font-semibold ${a.score >= 0.7 ? "text-red-600" : a.score >= 0.5 ? "text-amber-600" : "text-emerald-600"}`}>
-                      {a.score.toFixed(3)}
-                    </span>
+                    <StatusChip value={String(a.label || "UNKNOWN")} type="aiLabel" />
                   </TableCell>
-                  <TableCell><StatusChip value={a.label} type="aiLabel" /></TableCell>
-                  <TableCell className="font-mono text-[11px]">{a.latency_ms}ms</TableCell>
-                  <TableCell className="font-mono text-[11px] text-muted-foreground">{a.model_version}</TableCell>
-                  <TableCell className="font-mono text-[11px] text-muted-foreground">{a.error_code || "\u2014"}</TableCell>
+                  <TableCell className="font-mono text-[11px]">
+                    {a.latency_ms !== null && a.latency_ms !== undefined ? `${a.latency_ms}ms` : "N/A"}
+                  </TableCell>
+                  <TableCell className="font-mono text-[11px] text-muted-foreground">{a.model_version || "N/A"}</TableCell>
+                  <TableCell className="font-mono text-[11px] text-muted-foreground">{a.error_code || "—"}</TableCell>
                 </TableRow>
               ))}
             </TableBody>
           </Table>
         </Card>
       )}
-
-      {/* Related Incident */}
-      {relatedIncident && (
-        <Card className="border shadow-sm">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-semibold text-foreground">Related Incident</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <StatusChip value={relatedIncident.status} type="review" />
-                <span className="text-xs text-foreground">{relatedIncident.review_id}</span>
-                <span className="text-xs text-muted-foreground">Proposed: {relatedIncident.proposed_action}</span>
-              </div>
-              <Link href={`/incidents/${relatedIncident.review_id}`}>
-                <Button variant="outline" size="sm" className="h-7 gap-1 text-xs">
-                  View Incident <ExternalLink className="size-3" />
-                </Button>
-              </Link>
-            </div>
-          </CardContent>
-        </Card>
-      )}
     </div>
   )
 }
 
-function DetailRow({ label, value, mono, children }: { label: string; value?: string; mono?: boolean; children?: React.ReactNode }) {
+function DetailRow({
+  label,
+  value,
+  mono,
+  children,
+}: {
+  label: string
+  value?: string
+  mono?: boolean
+  children?: React.ReactNode
+}) {
   return (
     <div>
       <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">{label}</dt>
-      <dd className={`mt-0.5 text-xs text-foreground ${mono ? "font-mono" : ""}`}>
-        {children || value || ""}
+      <dd className={`mt-0.5 ${mono ? "font-mono text-xs" : "text-sm"} text-foreground break-all`}>
+        {children ?? value ?? "N/A"}
       </dd>
     </div>
   )

@@ -56,15 +56,6 @@ function LogsPageSkeleton() {
   )
 }
 
-function useDebounced<T>(value: T, delayMs: number): T {
-  const [v, setV] = useState(value)
-  useEffect(() => {
-    const t = setTimeout(() => setV(value), delayMs)
-    return () => clearTimeout(t)
-  }, [value, delayMs])
-  return v
-}
-
 function LogsPageInner() {
   const searchParams = useSearchParams()
   const fromSlack = searchParams.get("from") === "slack"
@@ -85,10 +76,6 @@ function LogsPageInner() {
 
   const offset = (page - 1) * PAGE_SIZE
 
-  // 텍스트 필터는 디바운스해서 과도한 호출 방지
-  const hostDebounced = useDebounced(filters.host.trim(), 300)
-  const clientIpDebounced = useDebounced(filters.clientIp.trim(), 300)
-
   // API 호출 파라미터 고정 (FastAPI와 UI 간 계약)
   const apiParams = useMemo(() => {
     return {
@@ -96,12 +83,12 @@ function LogsPageInner() {
       offset,
       decision: filters.decision !== "all" ? filters.decision : undefined,
       stage: filters.stage !== "all" ? filters.stage : undefined,
-      host: hostDebounced ? hostDebounced : undefined,
-      client_ip: clientIpDebounced ? clientIpDebounced : undefined,
+      host: filters.host ? filters.host : undefined,
+      client_ip: filters.clientIp ? filters.clientIp : undefined,
       sort: sortField || "detect_timestamp",
       dir: sortDir || "desc",
     }
-  }, [filters.decision, filters.stage, hostDebounced, clientIpDebounced, offset, sortField, sortDir])
+  }, [filters, offset, sortField, sortDir])
 
   useEffect(() => {
     let cancelled = false
@@ -147,12 +134,6 @@ function LogsPageInner() {
   const SortIndicator = ({ field }: { field: string }) =>
     sortField === field ? <span className="ml-1">{sortDir === "asc" ? "\u2191" : "\u2193"}</span> : null
 
-  const activeFilterCount =
-    (filters.decision !== "all" ? 1 : 0) +
-    (filters.stage !== "all" ? 1 : 0) +
-    (filters.host.trim() ? 1 : 0) +
-    (filters.clientIp.trim() ? 1 : 0)
-
   return (
     <div className="flex flex-col gap-4">
       <Breadcrumb>
@@ -163,26 +144,12 @@ function LogsPageInner() {
         </BreadcrumbList>
       </Breadcrumb>
 
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold text-foreground">Access Logs</h1>
-          <p className="text-sm text-muted-foreground">
-            {loading ? "Loading..." : `${total} log entries`}
-            {error ? <span className="ml-2 text-destructive">({error})</span> : null}
-          </p>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-8 text-xs"
-            onClick={clearFilters}
-            disabled={activeFilterCount === 0 && page === 1 && sortField === "detect_timestamp" && sortDir === "desc"}
-          >
-            <X className="mr-1 size-3.5" /> Reset
-          </Button>
-        </div>
+      <div>
+        <h1 className="text-xl font-semibold text-foreground">Access Logs</h1>
+        <p className="text-sm text-muted-foreground">
+          {loading ? "Loading..." : `${total} log entries`}
+          {error ? <span className="ml-2 text-destructive">({error})</span> : null}
+        </p>
       </div>
 
       {fromSlack && (
@@ -245,147 +212,160 @@ function LogsPageInner() {
                   setFilters(f => ({ ...f, host: e.target.value }))
                   setPage(1)
                 }}
-                className="h-8 w-[220px] pl-7 text-xs"
+                className="h-8 w-[180px] pl-7 text-xs"
               />
             </div>
           </div>
 
           <div className="flex flex-col gap-1">
             <label className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Client IP</label>
-            <div className="relative">
-              <Search className="absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                placeholder="Search client IP..."
-                value={filters.clientIp}
-                onChange={e => {
-                  setFilters(f => ({ ...f, clientIp: e.target.value }))
-                  setPage(1)
-                }}
-                className="h-8 w-[220px] pl-7 text-xs"
-              />
-            </div>
+            <Input
+              placeholder="Filter IP..."
+              value={filters.clientIp}
+              onChange={e => {
+                setFilters(f => ({ ...f, clientIp: e.target.value }))
+                setPage(1)
+              }}
+              className="h-8 w-[140px] text-xs"
+            />
           </div>
 
-          <div className="ml-auto flex items-center gap-2">
-            <div className="text-xs text-muted-foreground">
-              {activeFilterCount > 0 ? `${activeFilterCount} filter(s)` : "No filters"}
-            </div>
-          </div>
+          <Button variant="ghost" size="sm" className="h-8 text-xs text-muted-foreground" onClick={clearFilters}>
+            <X className="mr-1 size-3" /> Clear
+          </Button>
         </CardContent>
       </Card>
 
       {/* Table */}
       <Card className="border shadow-sm overflow-hidden">
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow className="bg-muted/50">
-                <TableHead className="text-[11px] w-[110px]">
-                  <button className="hover:underline" onClick={() => handleSort("log_id")}>
-                    ID<SortIndicator field="log_id" />
-                  </button>
-                </TableHead>
-                <TableHead className="text-[11px]">
-                  <button className="hover:underline" onClick={() => handleSort("detect_timestamp")}>
-                    Timestamp<SortIndicator field="detect_timestamp" />
-                  </button>
-                </TableHead>
-                <TableHead className="text-[11px]">Client</TableHead>
-                <TableHead className="text-[11px]">Host / Path</TableHead>
-                <TableHead className="text-[11px] w-[120px]">
-                  <button className="hover:underline" onClick={() => handleSort("decision")}>
-                    Decision<SortIndicator field="decision" />
-                  </button>
-                </TableHead>
-                <TableHead className="text-[11px] w-[140px]">
-                  <button className="hover:underline" onClick={() => handleSort("decision_stage")}>
-                    Stage<SortIndicator field="decision_stage" />
-                  </button>
-                </TableHead>
-                <TableHead className="text-[11px]">Reason</TableHead>
-              </TableRow>
-            </TableHeader>
+        <Table>
+          <TableHeader>
+            <TableRow className="bg-muted/50">
+              <TableHead className="text-[11px] cursor-pointer select-none" onClick={() => handleSort("detect_timestamp")}>
+                Timestamp<SortIndicator field="detect_timestamp" />
+              </TableHead>
+              <TableHead className="text-[11px] cursor-pointer select-none" onClick={() => handleSort("client_ip")}>
+                Client IP<SortIndicator field="client_ip" />
+              </TableHead>
+              <TableHead className="text-[11px] cursor-pointer select-none" onClick={() => handleSort("host")}>
+                Host<SortIndicator field="host" />
+              </TableHead>
+              <TableHead className="text-[11px]">Path</TableHead>
+              <TableHead className="text-[11px]">Decision</TableHead>
+              <TableHead className="text-[11px]">Stage</TableHead>
+              <TableHead className="text-[11px]">Reason</TableHead>
+              <TableHead className="text-[11px]">Policy</TableHead>
+              <TableHead className="text-[11px]">AI Score</TableHead>
+              <TableHead className="text-[11px]">Model</TableHead>
+              <TableHead className="text-[11px] cursor-pointer select-none" onClick={() => handleSort("engine_latency_ms")}>
+                Latency<SortIndicator field="engine_latency_ms" />
+              </TableHead>
+              <TableHead className="text-[11px]">Inject</TableHead>
+              <TableHead className="text-[11px]">Actions</TableHead>
+            </TableRow>
+          </TableHeader>
 
-            <TableBody>
-              {!loading && items.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={7} className="py-10 text-center text-sm text-muted-foreground">
-                    No logs found.
+          <TableBody>
+            {items.length === 0 && !loading ? (
+              <TableRow>
+                <TableCell colSpan={13} className="py-8 text-center text-sm text-muted-foreground">
+                  No logs found
+                </TableCell>
+              </TableRow>
+            ) : null}
+
+            {items.map(log => {
+              const ts = log.detect_timestamp ? new Date(log.detect_timestamp) : null
+              const tsText = ts
+                ? ts.toLocaleString("en-US", { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" })
+                : "N/A"
+
+              const injectCode = log.inject_status_code ? String(log.inject_status_code) : "—"
+              const reasonText = log.reason || ""
+
+              return (
+                <TableRow key={log.log_id} className="text-xs">
+                  <TableCell className="font-mono text-[11px] text-muted-foreground">{tsText}</TableCell>
+                  <TableCell className="font-mono text-[11px]">{log.client_ip || "N/A"}</TableCell>
+                  <TableCell className="max-w-[140px] truncate font-medium text-foreground">{log.host || "N/A"}</TableCell>
+                  <TableCell className="max-w-[100px] truncate text-muted-foreground">{log.path || "—"}</TableCell>
+
+                  <TableCell><StatusChip value={log.decision} /></TableCell>
+                  <TableCell><StatusChip value={log.decision_stage} type="stage" /></TableCell>
+
+                  {/* FAIL_STAGE에서 특히 중요: reason을 칩으로 */}
+                  <TableCell>
+                    {reasonText ? (
+                      <StatusChip value={String(reasonText)} type="reason" />
+                    ) : (
+                      <span className="text-muted-foreground text-[11px]">—</span>
+                    )}
+                  </TableCell>
+
+                  <TableCell className="font-mono text-[11px] text-muted-foreground">{log.policy_id || "—"}</TableCell>
+
+                  <TableCell className="font-mono text-[11px]">
+                    {log.ai_score === null || log.ai_score === undefined ? (
+                      "—"
+                    ) : (
+                      <span className={log.ai_score >= 0.7 ? "text-red-600 font-semibold" : log.ai_score >= 0.5 ? "text-amber-600" : "text-muted-foreground"}>
+                        {Number(log.ai_score).toFixed(2)}
+                      </span>
+                    )}
+                  </TableCell>
+
+                  <TableCell className="font-mono text-[11px] text-muted-foreground">{log.ai_model_version || "—"}</TableCell>
+
+                  <TableCell className="font-mono text-[11px]">
+                    {log.engine_latency_ms === null || log.engine_latency_ms === undefined ? "—" : `${log.engine_latency_ms}ms`}
+                  </TableCell>
+
+                  <TableCell className="font-mono text-[11px]">{injectCode}</TableCell>
+
+                  <TableCell>
+                    <Link href={`/logs/${log.log_id}`}>
+                      <Button variant="ghost" size="sm" className="h-6 px-2 text-xs text-primary">
+                        Open
+                      </Button>
+                    </Link>
                   </TableCell>
                 </TableRow>
-              ) : null}
-
-              {items.map((it) => {
-                const client = it.client_ip && it.client_port ? `${it.client_ip}:${it.client_port}` : it.client_ip || "N/A"
-                const host = it.host || "N/A"
-                const path = it.path || "N/A"
-                return (
-                  <TableRow key={it.log_id} className="text-xs">
-                    <TableCell className="font-mono text-[11px]">
-                      <Link href={`/logs/${it.log_id}`} className="text-primary hover:underline">
-                        {it.log_id}
-                      </Link>
-                    </TableCell>
-
-                    <TableCell className="font-mono text-[11px] text-muted-foreground">
-                      {it.detect_timestamp ? new Date(it.detect_timestamp).toLocaleString() : "N/A"}
-                    </TableCell>
-
-                    <TableCell className="font-mono text-[11px]">
-                      {client}
-                    </TableCell>
-
-                    <TableCell className="max-w-[520px]">
-                      <div className="font-mono text-[11px] truncate">{host}</div>
-                      <div className="font-mono text-[11px] text-muted-foreground truncate">{path}</div>
-                    </TableCell>
-
-                    <TableCell>
-                      <StatusChip value={String(it.decision || "ERROR")} />
-                    </TableCell>
-
-                    <TableCell>
-                      <StatusChip value={String(it.decision_stage || "FAIL_STAGE")} type="stage" />
-                    </TableCell>
-
-                    <TableCell className="font-mono text-[11px] text-muted-foreground">
-                      {it.reason || "—"}
-                    </TableCell>
-                  </TableRow>
-                )
-              })}
-            </TableBody>
-          </Table>
-        </CardContent>
+              )
+            })}
+          </TableBody>
+        </Table>
       </Card>
 
       {/* Pagination */}
-      <div className="flex items-center justify-between">
-        <div className="text-xs text-muted-foreground">
-          Page {page} / {totalPages} · Showing {items.length} of {total}
-        </div>
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between text-sm">
+          <span className="text-xs text-muted-foreground">
+            Showing {offset + 1}–{Math.min(offset + PAGE_SIZE, total)} of {total}
+          </span>
 
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-8 text-xs"
-            onClick={() => setPage(p => Math.max(1, p - 1))}
-            disabled={page <= 1 || loading}
-          >
-            Prev
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-8 text-xs"
-            onClick={() => setPage(p => Math.min(totalPages, p + 1))}
-            disabled={page >= totalPages || loading}
-          >
-            Next
-          </Button>
+          <div className="flex items-center gap-1">
+            <Button variant="outline" size="sm" className="h-7 text-xs" disabled={page <= 1} onClick={() => setPage(p => p - 1)}>
+              Previous
+            </Button>
+
+            {Array.from({ length: Math.min(totalPages, 5) }, (_, i) => i + 1).map(p => (
+              <Button
+                key={p}
+                variant={p === page ? "default" : "outline"}
+                size="sm"
+                className="h-7 w-7 text-xs p-0"
+                onClick={() => setPage(p)}
+              >
+                {p}
+              </Button>
+            ))}
+
+            <Button variant="outline" size="sm" className="h-7 text-xs" disabled={page >= totalPages} onClick={() => setPage(p => p + 1)}>
+              Next
+            </Button>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   )
 }

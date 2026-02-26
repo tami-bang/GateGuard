@@ -1,0 +1,46 @@
+"use client"
+
+import { useEffect } from "react"
+import { usePathname, useRouter, useSearchParams } from "next/navigation"
+import { AppSidebar } from "@/components/app-sidebar"
+import { AppHeader } from "@/components/app-header"
+import { useAuth } from "@/lib/auth-context"
+
+export default function DashboardLayout({ children }: { children: React.ReactNode }) {
+  const { isAuthenticated, bootstrapped } = useAuth()
+  const router = useRouter()
+  const pathname = usePathname()
+  const searchParams = useSearchParams()
+
+  // 현재 경로를 next로 넘겨서 로그인 후 원래 페이지로 복귀
+  const current = `${pathname}${searchParams?.toString() ? `?${searchParams.toString()}` : ""}`
+
+  useEffect(() => {
+    // 중요: 인증 부트스트랩 끝나기 전에는 아무 것도 하지 않는다 (레이스 방지)
+    if (!bootstrapped) return
+
+    if (!isAuthenticated) {
+      router.replace(`/?next=${encodeURIComponent(current)}`)
+    }
+  }, [bootstrapped, isAuthenticated, router, current])
+
+  // 부트스트랩 중에는 빈 화면(또는 스켈레톤)만 보여주고 redirect 하지 않는다
+  if (!bootstrapped) {
+    return <div className="min-h-screen bg-background" />
+  }
+
+  // 부트스트랩 끝났는데도 미인증이면 redirect가 걸리므로 화면만 비워둔다
+  if (!isAuthenticated) {
+    return <div className="min-h-screen bg-background" />
+  }
+
+  return (
+    <div className="flex min-h-screen bg-background">
+      <AppSidebar />
+      <div className="flex flex-1 flex-col pl-60 transition-all duration-200" id="main-content">
+        <AppHeader />
+        <main className="flex-1 p-6">{children}</main>
+      </div>
+    </div>
+  )
+}

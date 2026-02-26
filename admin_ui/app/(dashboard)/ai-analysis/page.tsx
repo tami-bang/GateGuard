@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useMemo } from "react"
+import { Suspense, useMemo, useState } from "react"
 import Link from "next/link"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -8,27 +8,65 @@ import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { StatusChip } from "@/components/status-chip"
-import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from "@/components/ui/breadcrumb"
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbLink,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb"
 import { X } from "lucide-react"
-import { BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from "recharts"
+import {
+  BarChart,
+  Bar,
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  PieChart,
+  Pie,
+  Cell,
+} from "recharts"
 import { mockAIAnalyses, aiScoreDistribution, aiLatencyOverTime } from "@/lib/mock-data"
 
 const COLORS = ["#dc2626", "#f59e0b", "#10b981", "#6b7280"]
 const PAGE_SIZE = 15
 
 export default function AIAnalysisPage() {
+  return (
+    <Suspense fallback={<AIAnalysisPageSkeleton />}>
+      <AIAnalysisPageInner />
+    </Suspense>
+  )
+}
+
+function AIAnalysisPageSkeleton() {
+  return <div className="min-h-screen bg-background" />
+}
+
+function AIAnalysisPageInner() {
   const [filters, setFilters] = useState({ label: "all", model: "all", minScore: "", maxScore: "" })
   const [page, setPage] = useState(1)
 
   const models = useMemo(() => [...new Set(mockAIAnalyses.map(a => a.model_version))], [])
+
   const labelDistribution = useMemo(() => {
     const counts: Record<string, number> = {}
-    mockAIAnalyses.forEach(a => { counts[a.label] = (counts[a.label] || 0) + 1 })
+    mockAIAnalyses.forEach(a => {
+      counts[a.label] = (counts[a.label] || 0) + 1
+    })
     return Object.entries(counts).map(([name, value]) => ({ name, value }))
   }, [])
+
   const modelUsage = useMemo(() => {
     const counts: Record<string, number> = {}
-    mockAIAnalyses.forEach(a => { counts[a.model_version] = (counts[a.model_version] || 0) + 1 })
+    mockAIAnalyses.forEach(a => {
+      counts[a.model_version] = (counts[a.model_version] || 0) + 1
+    })
     return Object.entries(counts).map(([model, count]) => ({ model, count }))
   }, [])
 
@@ -48,9 +86,13 @@ export default function AIAnalysisPage() {
     <div className="flex flex-col gap-4">
       <Breadcrumb>
         <BreadcrumbList>
-          <BreadcrumbItem><BreadcrumbLink href="/dashboard">Dashboard</BreadcrumbLink></BreadcrumbItem>
+          <BreadcrumbItem>
+            <BreadcrumbLink href="/dashboard">Dashboard</BreadcrumbLink>
+          </BreadcrumbItem>
           <BreadcrumbSeparator />
-          <BreadcrumbItem><BreadcrumbPage>AI Analysis</BreadcrumbPage></BreadcrumbItem>
+          <BreadcrumbItem>
+            <BreadcrumbPage>AI Analysis</BreadcrumbPage>
+          </BreadcrumbItem>
         </BreadcrumbList>
       </Breadcrumb>
 
@@ -59,7 +101,6 @@ export default function AIAnalysisPage() {
         <p className="text-sm text-muted-foreground">{filtered.length} analysis records</p>
       </div>
 
-      {/* Charts */}
       <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-4">
         <Card className="border shadow-sm">
           <CardHeader className="pb-2">
@@ -85,7 +126,16 @@ export default function AIAnalysisPage() {
           <CardContent className="flex items-center justify-center">
             <ResponsiveContainer width="100%" height={160}>
               <PieChart>
-                <Pie data={labelDistribution} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={55} innerRadius={30} paddingAngle={2}>
+                <Pie
+                  data={labelDistribution}
+                  dataKey="value"
+                  nameKey="name"
+                  cx="50%"
+                  cy="50%"
+                  outerRadius={55}
+                  innerRadius={30}
+                  paddingAngle={2}
+                >
                   {labelDistribution.map((_, i) => (
                     <Cell key={i} fill={COLORS[i % COLORS.length]} />
                   ))}
@@ -131,13 +181,20 @@ export default function AIAnalysisPage() {
         </Card>
       </div>
 
-      {/* Filters */}
       <Card className="border shadow-sm">
         <CardContent className="flex flex-wrap items-end gap-3 p-3">
           <div className="flex flex-col gap-1">
             <label className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Label</label>
-            <Select value={filters.label} onValueChange={v => { setFilters(f => ({ ...f, label: v })); setPage(1) }}>
-              <SelectTrigger className="h-8 w-[130px] text-xs"><SelectValue /></SelectTrigger>
+            <Select
+              value={filters.label}
+              onValueChange={v => {
+                setFilters(f => ({ ...f, label: v }))
+                setPage(1)
+              }}
+            >
+              <SelectTrigger className="h-8 w-[130px] text-xs">
+                <SelectValue />
+              </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All</SelectItem>
                 <SelectItem value="MALICIOUS">Malicious</SelectItem>
@@ -147,16 +204,30 @@ export default function AIAnalysisPage() {
               </SelectContent>
             </Select>
           </div>
+
           <div className="flex flex-col gap-1">
             <label className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Model</label>
-            <Select value={filters.model} onValueChange={v => { setFilters(f => ({ ...f, model: v })); setPage(1) }}>
-              <SelectTrigger className="h-8 w-[120px] text-xs"><SelectValue /></SelectTrigger>
+            <Select
+              value={filters.model}
+              onValueChange={v => {
+                setFilters(f => ({ ...f, model: v }))
+                setPage(1)
+              }}
+            >
+              <SelectTrigger className="h-8 w-[120px] text-xs">
+                <SelectValue />
+              </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All</SelectItem>
-                {models.map(m => <SelectItem key={m} value={m}>{m}</SelectItem>)}
+                {models.map(m => (
+                  <SelectItem key={m} value={m}>
+                    {m}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
           </div>
+
           <div className="flex flex-col gap-1">
             <label className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Min Score</label>
             <Input
@@ -165,11 +236,15 @@ export default function AIAnalysisPage() {
               min="0"
               max="1"
               value={filters.minScore}
-              onChange={e => { setFilters(f => ({ ...f, minScore: e.target.value })); setPage(1) }}
+              onChange={e => {
+                setFilters(f => ({ ...f, minScore: e.target.value }))
+                setPage(1)
+              }}
               placeholder="0.0"
               className="h-8 w-[80px] text-xs"
             />
           </div>
+
           <div className="flex flex-col gap-1">
             <label className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Max Score</label>
             <Input
@@ -178,18 +253,29 @@ export default function AIAnalysisPage() {
               min="0"
               max="1"
               value={filters.maxScore}
-              onChange={e => { setFilters(f => ({ ...f, maxScore: e.target.value })); setPage(1) }}
+              onChange={e => {
+                setFilters(f => ({ ...f, maxScore: e.target.value }))
+                setPage(1)
+              }}
               placeholder="1.0"
               className="h-8 w-[80px] text-xs"
             />
           </div>
-          <Button variant="ghost" size="sm" className="h-8 text-xs text-muted-foreground" onClick={() => { setFilters({ label: "all", model: "all", minScore: "", maxScore: "" }); setPage(1) }}>
+
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-8 text-xs text-muted-foreground"
+            onClick={() => {
+              setFilters({ label: "all", model: "all", minScore: "", maxScore: "" })
+              setPage(1)
+            }}
+          >
             <X className="mr-1 size-3" /> Clear
           </Button>
         </CardContent>
       </Card>
 
-      {/* Table */}
       <Card className="border shadow-sm overflow-hidden">
         <Table>
           <TableHeader>
@@ -206,18 +292,33 @@ export default function AIAnalysisPage() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {paginated.map((a) => (
+            {paginated.map(a => (
               <TableRow key={a.ai_analysis_id} className="text-xs">
                 <TableCell className="font-mono text-[11px] text-muted-foreground">
-                  {new Date(a.analyzed_at).toLocaleString("en-US", { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                  {new Date(a.analyzed_at).toLocaleString("en-US", {
+                    month: "short",
+                    day: "2-digit",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
                 </TableCell>
-                <TableCell><Link href={`/logs/${a.log_id}`} className="font-mono text-[11px] text-primary hover:underline">{a.log_id}</Link></TableCell>
                 <TableCell>
-                  <span className={`font-mono font-semibold text-[11px] ${a.score >= 0.7 ? "text-red-600" : a.score >= 0.5 ? "text-amber-600" : "text-emerald-600"}`}>
+                  <Link href={`/logs/${a.log_id}`} className="font-mono text-[11px] text-primary hover:underline">
+                    {a.log_id}
+                  </Link>
+                </TableCell>
+                <TableCell>
+                  <span
+                    className={`font-mono font-semibold text-[11px] ${
+                      a.score >= 0.7 ? "text-red-600" : a.score >= 0.5 ? "text-amber-600" : "text-emerald-600"
+                    }`}
+                  >
                     {a.score.toFixed(3)}
                   </span>
                 </TableCell>
-                <TableCell><StatusChip value={a.label} type="aiLabel" /></TableCell>
+                <TableCell>
+                  <StatusChip value={a.label} type="aiLabel" />
+                </TableCell>
                 <TableCell className="font-mono text-[11px]">{a.latency_ms}ms</TableCell>
                 <TableCell className="font-mono text-[11px] text-muted-foreground">{a.model_version}</TableCell>
                 <TableCell className="font-mono text-[11px] text-muted-foreground">{a.error_code || "\u2014"}</TableCell>
@@ -235,8 +336,12 @@ export default function AIAnalysisPage() {
             Showing {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, filtered.length)} of {filtered.length}
           </span>
           <div className="flex items-center gap-1">
-            <Button variant="outline" size="sm" className="h-7 text-xs" disabled={page <= 1} onClick={() => setPage(p => p - 1)}>Previous</Button>
-            <Button variant="outline" size="sm" className="h-7 text-xs" disabled={page >= totalPages} onClick={() => setPage(p => p + 1)}>Next</Button>
+            <Button variant="outline" size="sm" className="h-7 text-xs" disabled={page <= 1} onClick={() => setPage(p => p - 1)}>
+              Previous
+            </Button>
+            <Button variant="outline" size="sm" className="h-7 text-xs" disabled={page >= totalPages} onClick={() => setPage(p => p + 1)}>
+              Next
+            </Button>
           </div>
         </div>
       )}
