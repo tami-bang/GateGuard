@@ -5,6 +5,7 @@ from typing import Optional, Any, List
 
 import pymysql
 from fastapi import FastAPI, Header, HTTPException, Query, Response
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 
@@ -34,6 +35,20 @@ MODEL_VERSION = os.getenv("MODEL_VERSION", "urlclf-unknown")
 THRESHOLD = float(os.getenv("THRESHOLD", "0.50"))
 
 app = FastAPI(title="GateGuard AI Scoring API")
+
+# --- CORS (Admin UI에서 FastAPI 호출 허용) ---
+allowed_origins = [
+    "http://192.168.1.24:8080",
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def db_conn():
@@ -177,12 +192,9 @@ def list_logs(
       al.inject_errno,
       al.inject_latency_ms,
       al.inject_status_code,
-
       aa.score AS ai_score,
       aa.model_version AS ai_model_version
-
     FROM access_log al
-
     LEFT JOIN (
       SELECT x.*
       FROM ai_analysis x
@@ -192,7 +204,6 @@ def list_logs(
         GROUP BY log_id
       ) m ON m.log_id = x.log_id AND m.max_seq = x.analysis_seq
     ) aa ON aa.log_id = al.log_id
-
     {where_sql}
     {order_sql}
     LIMIT %s OFFSET %s
@@ -247,7 +258,6 @@ def score(req: ScoreRequest, authorization: Optional[str] = Header(default=None)
             status_code=200,
         )
 
-    # ---- 정상 scoring ----
     threshold = THRESHOLD
     s = simple_score(req.host, req.path)
     lbl = label_from_score(s, threshold)
