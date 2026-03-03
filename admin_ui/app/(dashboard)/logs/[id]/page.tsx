@@ -12,14 +12,18 @@ import {
   BreadcrumbPage,
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb"
-import { ShieldAlert, FileText, ArrowLeft, ExternalLink } from "lucide-react"
+import { ArrowLeft, ExternalLink } from "lucide-react"
 
 import { apiGetLogDetail, type AIAnalysisItem } from "@/lib/api-client"
+import { IncidentActionPanel } from "@/components/incident-action-panel"
 
-type LogDetailPageProps = { params: { id: string } }
+type MaybePromise<T> = T | Promise<T>
+type LogDetailPageProps = { params: MaybePromise<{ id: string }> }
 
 export default async function LogDetailPage({ params }: LogDetailPageProps) {
-  const logId = Number(params.id)
+  const p = await Promise.resolve(params)
+  const logId = Number(p?.id)
+
   if (!Number.isFinite(logId)) {
     return (
       <div className="flex flex-col items-center justify-center gap-4 py-20">
@@ -33,7 +37,6 @@ export default async function LogDetailPage({ params }: LogDetailPageProps) {
     )
   }
 
-  // 통합본 패턴 (요구한 그대로)
   let data: Awaited<ReturnType<typeof apiGetLogDetail>> | null = null
   try {
     data = await apiGetLogDetail(logId)
@@ -68,7 +71,6 @@ export default async function LogDetailPage({ params }: LogDetailPageProps) {
   const serverAddr =
     log.server_ip && log.server_port ? `${log.server_ip}:${log.server_port}` : log.server_ip || "N/A"
 
-  // View API 버튼에서 127.0.0.1 뜨는 문제 방지 (VM 기준 fallback)
   const apiBase = (process.env.NEXT_PUBLIC_FASTAPI_BASE_URL || "http://192.168.1.24:8000").replace(/\/+$/, "")
 
   return (
@@ -89,7 +91,7 @@ export default async function LogDetailPage({ params }: LogDetailPageProps) {
         </BreadcrumbList>
       </Breadcrumb>
 
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <Link href="/logs">
             <Button variant="ghost" size="sm" className="h-8 px-2">
@@ -102,19 +104,8 @@ export default async function LogDetailPage({ params }: LogDetailPageProps) {
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <Link href={`/incidents?create=${log.log_id}`}>
-            <Button size="sm" className="h-8 gap-1.5 text-xs">
-              <ShieldAlert className="size-3.5" /> Create Incident
-            </Button>
-          </Link>
-
-          <Link href={`/policies/new?from_log=${log.log_id}`}>
-            <Button variant="outline" size="sm" className="h-8 gap-1.5 text-xs">
-              <FileText className="size-3.5" /> Create Policy
-            </Button>
-          </Link>
-
+        <div className="flex items-start gap-4">
+          <IncidentActionPanel logId={log.log_id} />
           <a href={`${apiBase}/v1/logs/${log.log_id}`} target="_blank" rel="noreferrer">
             <Button variant="outline" size="sm" className="h-8 gap-1.5 text-xs">
               View API <ExternalLink className="size-3.5" />
@@ -124,7 +115,6 @@ export default async function LogDetailPage({ params }: LogDetailPageProps) {
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        {/* Request Summary */}
         <Card className="border shadow-sm">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-semibold text-foreground">Request Summary</CardTitle>
@@ -154,7 +144,6 @@ export default async function LogDetailPage({ params }: LogDetailPageProps) {
           </CardContent>
         </Card>
 
-        {/* Decision Summary */}
         <Card className="border shadow-sm">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-semibold text-foreground">Decision Summary</CardTitle>
@@ -181,6 +170,7 @@ export default async function LogDetailPage({ params }: LogDetailPageProps) {
                   <span className="text-muted-foreground text-xs">N/A</span>
                 )}
               </DetailRow>
+
               <DetailRow
                 label="Engine Latency"
                 value={
@@ -194,7 +184,6 @@ export default async function LogDetailPage({ params }: LogDetailPageProps) {
           </CardContent>
         </Card>
 
-        {/* AI Analysis - Latest */}
         <Card className="border shadow-sm">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-semibold text-foreground">AI Analysis (Latest)</CardTitle>
@@ -212,14 +201,18 @@ export default async function LogDetailPage({ params }: LogDetailPageProps) {
                 </DetailRow>
                 <DetailRow
                   label="Latency"
-                  value={latestAI.latency_ms !== null && latestAI.latency_ms !== undefined ? `${latestAI.latency_ms}ms` : "N/A"}
+                  value={
+                    latestAI.latency_ms !== null && latestAI.latency_ms !== undefined ? `${latestAI.latency_ms}ms` : "N/A"
+                  }
                   mono
                 />
                 <DetailRow label="Model Version" value={latestAI.model_version || "N/A"} mono />
                 <DetailRow label="Error Code" value={latestAI.error_code || "None"} />
                 <DetailRow label="Analysis Seq" value={String(latestAI.analysis_seq ?? 0)} />
                 <div className="col-span-2">
-                  <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider mb-1">AI Response</dt>
+                  <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider mb-1">
+                    AI Response
+                  </dt>
                   <dd className="rounded-md bg-muted p-3 text-xs text-foreground leading-relaxed break-all">
                     {latestAI.ai_response || "N/A"}
                   </dd>
@@ -231,7 +224,6 @@ export default async function LogDetailPage({ params }: LogDetailPageProps) {
           </CardContent>
         </Card>
 
-        {/* Injection / Reply Status */}
         <Card className="border shadow-sm">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-semibold text-foreground">Injection / Reply Status</CardTitle>
@@ -258,7 +250,11 @@ export default async function LogDetailPage({ params }: LogDetailPageProps) {
 
               <DetailRow
                 label="Inject Latency"
-                value={log.inject_latency_ms !== null && log.inject_latency_ms !== undefined ? `${log.inject_latency_ms}ms` : "N/A"}
+                value={
+                  log.inject_latency_ms !== null && log.inject_latency_ms !== undefined
+                    ? `${log.inject_latency_ms}ms`
+                    : "N/A"
+                }
                 mono
               />
 
@@ -276,11 +272,12 @@ export default async function LogDetailPage({ params }: LogDetailPageProps) {
         </Card>
       </div>
 
-      {/* AI Analysis History */}
       {aiAnalyses.length > 1 && (
         <Card className="border shadow-sm overflow-hidden">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-semibold text-foreground">AI Analysis History ({aiAnalyses.length} runs)</CardTitle>
+            <CardTitle className="text-sm font-semibold text-foreground">
+              AI Analysis History ({aiAnalyses.length} runs)
+            </CardTitle>
           </CardHeader>
           <Table>
             <TableHeader>
@@ -296,10 +293,7 @@ export default async function LogDetailPage({ params }: LogDetailPageProps) {
             </TableHeader>
             <TableBody>
               {aiAnalyses.map((a) => (
-                <TableRow
-                  key={`${a.analysis_seq}-${a.analyzed_at ?? ""}`}
-                  className="text-xs"
-                >
+                <TableRow key={`${a.analysis_seq}-${a.analyzed_at ?? ""}`} className="text-xs">
                   <TableCell className="font-mono text-[11px]">{a.analysis_seq}</TableCell>
                   <TableCell className="font-mono text-[11px] text-muted-foreground">
                     {a.analyzed_at ? new Date(a.analyzed_at).toLocaleString() : "N/A"}

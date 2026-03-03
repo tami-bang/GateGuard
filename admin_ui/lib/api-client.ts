@@ -72,7 +72,59 @@ type LogDetailRespA = { log: AccessLogItem; analyses: AIAnalysisItem[] }
 type LogDetailRespB = AccessLogItem & { analyses?: AIAnalysisItem[] }
 
 /**
- * Base URL 규칙 (너 기존 규칙 유지 + fallback 개선)
+ * Review/Incident (review_event) types
+ * - 설계서/백엔드 구현 기준: incidents == review-events alias
+ */
+export type ReviewStatus = "OPEN" | "IN_PROGRESS" | "CLOSED" | string
+export type ReviewAction = "ALLOW" | "BLOCK" | "CREATE_POLICY" | "UPDATE_POLICY" | "NO_ACTION" | string
+
+export type ReviewEvent = {
+  review_id: number
+  log_id: number
+  status: ReviewStatus
+  proposed_action: ReviewAction | null
+  reviewer_id: number | null
+  note: string | null
+  created_at: string | null
+  reviewed_at: string | null
+  generated_policy_id: number | null
+  updated_at?: string | null
+}
+
+export type CreateIncidentRequest = {
+  log_id: number
+  proposed_action?: ReviewAction | null
+  note?: string | null
+  reviewer_id?: number | null
+}
+
+export type PatchIncidentRequest = {
+  status?: ReviewStatus | null
+  proposed_action?: ReviewAction | null
+  note?: string | null
+  reviewer_id?: number | null
+}
+
+export type CreatePolicyFromIncidentRequest = {
+  policy_name?: string | null
+  policy_type?: string | null
+  action?: string | null
+  host?: string | null
+  path?: string | null
+  method?: string | null
+}
+
+export type GetIncidentByLogResponse = { review_event: ReviewEvent | null }
+export type CreateIncidentResponse = { review_event: ReviewEvent; log: AccessLogItem }
+export type PatchIncidentResponse = { review_event: ReviewEvent }
+export type CreatePolicyFromIncidentResponse = {
+  policy_id: number
+  policy?: any
+  review_event: ReviewEvent
+}
+
+/**
+ * Base URL 규칙
  * 1) NEXT_PUBLIC_FASTAPI_BASE_URL 있으면 사용
  * 2) 브라우저면 "현재 UI 접속 호스트:8000" 자동 추론
  * 3) SSR/빌드 환경이면 192.168.1.24:8000 (VM 기준)
@@ -107,7 +159,6 @@ async function httpJson<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     method: init?.method ?? "GET",
     cache: "no-store",
-    // 쿠키 세션 인증이면 필수
     credentials: "include",
     headers: {
       "Content-Type": "application/json",
@@ -164,4 +215,36 @@ export async function apiGetLogDetail(logId: number): Promise<LogDetail> {
     log: data as AccessLogItem,
     analyses: Array.isArray((data as any).analyses) ? (data as any).analyses : [],
   }
+}
+
+/**
+ * Incident APIs (alias: /v1/incidents == /v1/review-events)
+ * - 데모/운영은 incidents 경로를 UI에서 쓰는 게 직관적이라 incidents로 통일
+ */
+export async function apiGetIncidentByLog(logId: number): Promise<GetIncidentByLogResponse> {
+  return await httpJson<GetIncidentByLogResponse>(`/v1/incidents/by-log/${logId}`)
+}
+
+export async function apiCreateIncident(req: CreateIncidentRequest): Promise<CreateIncidentResponse> {
+  return await httpJson<CreateIncidentResponse>(`/v1/incidents`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  })
+}
+
+export async function apiPatchIncident(reviewId: number, req: PatchIncidentRequest): Promise<PatchIncidentResponse> {
+  return await httpJson<PatchIncidentResponse>(`/v1/incidents/${reviewId}`, {
+    method: "PATCH",
+    body: JSON.stringify(req),
+  })
+}
+
+export async function apiCreatePolicyFromIncident(
+  reviewId: number,
+  req?: CreatePolicyFromIncidentRequest
+): Promise<CreatePolicyFromIncidentResponse> {
+  return await httpJson<CreatePolicyFromIncidentResponse>(`/v1/incidents/${reviewId}/actions/create-policy`, {
+    method: "POST",
+    body: JSON.stringify(req ?? {}),
+  })
 }

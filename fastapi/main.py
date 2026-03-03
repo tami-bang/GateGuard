@@ -1,7 +1,9 @@
 import os
 import time
 import uuid
-from typing import Optional, Any, List
+import json
+from datetime import datetime
+from typing import Optional, Any, List, Dict
 
 import pymysql
 from fastapi import FastAPI, Header, HTTPException, Query, Response
@@ -63,6 +65,604 @@ def db_conn():
         autocommit=True,
     )
 
+
+# =========================
+# Common helpers
+# =========================
+
+_TABLE_COLS_CACHE: Dict[str, set] = {}  # (table_name) -> set(cols)
+
+
+def _now_str() -> str:
+    # MariaDB DATETIME 호환 문자열
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _get_table_cols(conn, table: str) -> set:
+    key = table.lower()
+    if key in _TABLE_COLS_CACHE:
+        return _TABLE_COLS_CACHE[key]
+    with conn.cursor() as cur:
+        cur.execute(f"SHOW COLUMNS FROM {table}")
+        cols = {r["Field"] for r in cur.fetchall()}
+    _TABLE_COLS_CACHE[key] = cols
+    return cols
+
+
+def _filter_payload_by_cols(payload: dict, cols: set) -> dict:
+    return {k: v for k, v in payload.items() if k in cols}
+
+
+def _insert_dynamic(cur, table: str, payload: dict) -> int:
+    """
+    payload의 key/value를 그대로 INSERT (컬럼 존재하는 것만 넣어야 함)
+    return: lastrowid
+    """
+    if not payload:
+        raise HTTPException(status_code=400, detail=f"no insertable columns for {table}")
+    cols = list(payload.keys())
+    vals = [payload[c] for c in cols]
+    col_sql = ", ".join(cols)
+    ph_sql = ", ".join(["%s"] * len(cols))
+    sql = f"INSERT INTO {table} ({col_sql}) VALUES ({ph_sql})"
+    cur.execute(sql, vals)
+    return int(cur.lastrowid)
+
+
+def _update_dynamic(cur, table: str, key_col: str, key_val: Any, payload: dict) -> int:
+    """
+    payload의 key/value를 그대로 UPDATE
+    return: affected rows
+    """
+    if not payload:
+        return 0
+    sets = ", ".join([f"{k}=%s" for k in payload.keys()])
+    vals = list(payload.values()) + [key_val]
+    sql = f"UPDATE {table} SET {sets} WHERE {key_col}=%s"
+    cur.execute(sql, vals)
+    return int(cur.rowcount)
+
+
+# =========================
+# Access log helpers (existing)
+# =========================
+
+def _get_access_log(conn, log_id: int) -> dict:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM access_log WHERE log_id=%s", (log_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="log not found")
+        return row
+
+
+# =========================
+# Review Event (review_event) SSOT
+# =========================
+
+REVIEW_STATUS_OPEN = "OPEN"
+REVIEW_STATUS_IN_PROGRESS = "IN_PROGRESS"
+REVIEW_STATUS_CLOSED = "CLOSED"
+
+REVIEW_ALLOWED_STATUS = {REVIEW_STATUS_OPEN, REVIEW_STATUS_IN_PROGRESS, REVIEW_STATUS_CLOSED}
+
+REVIEW_ACTION_ALLOW = "ALLOW"
+REVIEW_ACTION_BLOCK = "BLOCK"
+REVIEW_ACTION_CREATE_POLICY = "CREATE_POLICY"
+REVIEW_ACTION_UPDATE_POLICY = "UPDATE_POLICY"
+REVIEW_ACTION_NO_ACTION = "NO_ACTION"
+
+REVIEW_ALLOWED_ACTION = {
+    REVIEW_ACTION_ALLOW,
+    REVIEW_ACTION_BLOCK,
+    REVIEW_ACTION_CREATE_POLICY,
+    REVIEW_ACTION_UPDATE_POLICY,
+    REVIEW_ACTION_NO_ACTION,
+}
+
+
+def _review_id_col(conn) -> str:
+    cols = _get_table_cols(conn, "review_event")
+    if "review_id" not in cols:
+        raise HTTPException(status_code=500, detail="review_event.review_id column not found (SSOT mismatch)")
+    return "review_id"
+
+
+def _get_review_event_by_id(conn, review_id: int) -> dict:
+    id_col = _review_id_col(conn)
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT * FROM review_event WHERE {id_col}=%s", (review_id,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="review_event not found")
+        return row
+
+
+def _get_review_event_by_log(conn, log_id: int) -> Optional[dict]:
+    cols = _get_table_cols(conn, "review_event")
+    if "log_id" not in cols:
+        raise HTTPException(status_code=500, detail="review_event.log_id column not found")
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM review_event WHERE log_id=%s ORDER BY review_id DESC LIMIT 1",
+            (int(log_id),),
+        )
+        return cur.fetchone()
+
+
+class ReviewEventCreateRequest(BaseModel):
+    # 설계서 기준: 생성 최소값
+    log_id: int
+    proposed_action: Optional[str] = None  # ALLOW/BLOCK/CREATE_POLICY/UPDATE_POLICY/NO_ACTION
+    note: Optional[str] = None
+
+    # 운영자 지정(선택) - 설계서: reviewer_id는 nullable
+    reviewer_id: Optional[int] = None
+
+
+class ReviewEventPatchRequest(BaseModel):
+    status: Optional[str] = None  # OPEN/IN_PROGRESS/CLOSED
+    proposed_action: Optional[str] = None
+    note: Optional[str] = None
+    reviewer_id: Optional[int] = None
+
+
+class CreatePolicyFromReviewRequest(BaseModel):
+    # 정책 생성 시 override 용 (없으면 access_log 기반)
+    policy_name: Optional[str] = None
+    policy_type: Optional[str] = None  # ALLOWLIST/BLOCKLIST/MONITOR
+    action: Optional[str] = None       # ALLOW/BLOCK/MONITOR
+
+    host: Optional[str] = None
+    path: Optional[str] = None
+    method: Optional[str] = None
+
+
+class ResolveReviewRequest(BaseModel):
+    # CLOSED 처리 + (옵션) policy 생성
+    note: Optional[str] = None
+    reviewer_id: Optional[int] = None
+    create_policy: bool = False
+    policy_override: Optional[CreatePolicyFromReviewRequest] = None
+
+def _create_policy_from_review_tx(
+    cur,
+    conn,
+    review_event: dict,
+    access_log: dict,
+    override: Optional[CreatePolicyFromReviewRequest],
+) -> int:
+    """
+    트랜잭션 내부에서 실행.
+    DB 스키마(2026-03-03 확인) 기준:
+    - policy.is_enabled 사용
+    - policy_rule: (rule_type, match_type, pattern, is_case_sensitive, is_negated, rule_order) 필수
+    - policy_audit: (changed_by, changed_at, change_note, source_review_id, after_snapshot 등)
+    return: policy_id
+    """
+    policy_cols = _get_table_cols(conn, "policy")
+    rule_cols = _get_table_cols(conn, "policy_rule")
+    audit_cols = _get_table_cols(conn, "policy_audit")
+    review_cols = _get_table_cols(conn, "review_event")
+
+    review_id = int(review_event["review_id"])
+    log_id = int(review_event["log_id"])
+
+    # access_log 기반 + override 우선
+    def pick_log_or_override(log_key: str, ov_val: Optional[str]) -> Optional[str]:
+        if ov_val is not None and ov_val != "":
+            return ov_val
+        v = access_log.get(log_key)
+        if v is None:
+            return None
+        return str(v)
+
+    host = pick_log_or_override("host", override.host if override else None)
+    path = pick_log_or_override("path", override.path if override else None)
+
+    # method는 access_log에 있을 수 있지만, policy_rule enum에 METHOD가 없어서 정책 rule로는 미사용
+    method = pick_log_or_override("method", override.method if override else None)
+
+    policy_name = (override.policy_name if override and override.policy_name else None) or f"review-{review_id}-log-{log_id}"
+    policy_type = (override.policy_type if override and override.policy_type else None) or "BLOCKLIST"
+    action = (override.action if override and override.action else None) or "BLOCK"
+
+    # 최소 룰: host 필수
+    if not host:
+        raise HTTPException(status_code=400, detail="cannot create policy: access_log.host is empty")
+
+    # ---- policy INSERT (policy 스키마 맞춤) ----
+    base_policy_payload = {
+        "policy_name": policy_name,
+        "policy_type": policy_type,
+        "action": action,
+        "priority": 100,
+        "is_enabled": 1,
+        "created_at": _now_str(),   # 있어도 되고 없어도 됨(기본값 존재)
+        "updated_at": _now_str(),
+        "created_by": int(review_event.get("reviewer_id") or 1),  # created_by NOT NULL (default 1)
+        "updated_by": int(review_event.get("reviewer_id") or 1),
+    }
+    policy_payload = _filter_payload_by_cols(base_policy_payload, policy_cols)
+    policy_id = _insert_dynamic(cur, "policy", policy_payload)
+
+    # ---- policy_rule INSERT (policy_rule 스키마 맞춤) ----
+    # 필수: policy_id, rule_type, match_type, pattern, is_case_sensitive, is_negated, rule_order
+    rules = []
+
+    # HOST rule: EXACT 매칭 권장
+    host_rule = {
+        "policy_id": policy_id,
+        "rule_type": "HOST",
+        "match_type": "EXACT",
+        "pattern": host,
+        "is_case_sensitive": 0,
+        "is_negated": 0,
+        "rule_order": 0,
+        "is_enabled": 1,
+        "created_at": _now_str(),
+    }
+    host_rule = _filter_payload_by_cols(host_rule, rule_cols)
+    if not host_rule:
+        raise HTTPException(status_code=500, detail="policy_rule schema mismatch: cannot insert HOST rule")
+    rules.append(host_rule)
+
+    # PATH rule: PREFIX 매칭 권장 (/login 같은)
+    if path:
+        path_rule = {
+            "policy_id": policy_id,
+            "rule_type": "PATH",
+            "match_type": "PREFIX",
+            "pattern": path,
+            "is_case_sensitive": 0,
+            "is_negated": 0,
+            "rule_order": 1,
+            "is_enabled": 1,
+            "created_at": _now_str(),
+        }
+        path_rule = _filter_payload_by_cols(path_rule, rule_cols)
+        # path 룰이 insertable 하면 추가(스키마/제약 대응)
+        if path_rule:
+            rules.append(path_rule)
+
+    for r in rules:
+        _insert_dynamic(cur, "policy_rule", r)
+
+    # ---- policy_audit INSERT (policy_audit 스키마 맞춤) ----
+    changed_by = int(review_event.get("reviewer_id") or 1)  # 0 대신 1 권장(스키마 NOT NULL)
+
+    audit_payload = {
+        "policy_id": policy_id,
+        "action": "CREATE",
+        "changed_by": changed_by,
+        "changed_at": _now_str(),
+        "source_review_id": review_id,
+        "change_note": f"policy created from review_event(review_id={review_id}, log_id={log_id})",
+        "before_snapshot": None,
+        "after_snapshot": json.dumps(
+            {
+                "policy": {
+                    "policy_id": policy_id,
+                    "policy_name": policy_name,
+                    "policy_type": policy_type,
+                    "action": action,
+                    "priority": 100,
+                    "is_enabled": 1,
+                },
+                "rules": [
+                    {"rule_type": "HOST", "match_type": "EXACT", "pattern": host},
+                    {"rule_type": "PATH", "match_type": "PREFIX", "pattern": path} if path else None,
+                ],
+                "source": {"review_id": review_id, "log_id": log_id},
+                "log_context": {"method": method},
+            },
+            ensure_ascii=False,
+        ),
+    }
+    audit_payload = _filter_payload_by_cols(audit_payload, audit_cols)
+    if audit_payload:
+        _insert_dynamic(cur, "policy_audit", audit_payload)
+
+    # ---- review_event 업데이트: generated_policy_id + CLOSED + reviewed_at ----
+    upd = {}
+    if "generated_policy_id" in review_cols:
+        upd["generated_policy_id"] = policy_id
+    if "status" in review_cols:
+        upd["status"] = REVIEW_STATUS_CLOSED
+    if "reviewed_at" in review_cols:
+        upd["reviewed_at"] = _now_str()
+
+    if upd:
+        _update_dynamic(cur, "review_event", "review_id", review_id, upd)
+
+    return policy_id 
+
+# -------------------------
+# Review Event API (review_event)
+# -------------------------
+# URL 호환을 위해 /v1/incidents 도 같이 열어둔다.
+# -------------------------
+
+@app.get("/v1/review-events")
+@app.get("/review-events")
+@app.get("/v1/incidents")   # backward alias
+@app.get("/incidents")      # backward alias
+def list_review_events(
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    status: Optional[str] = None,
+    log_id: Optional[int] = None,
+    sort: Optional[str] = "created_at",
+    dir: Optional[str] = "desc",
+):
+    with db_conn() as conn:
+        cols = _get_table_cols(conn, "review_event")
+
+        where = []
+        params: List[Any] = []
+
+        if status:
+            if status not in REVIEW_ALLOWED_STATUS:
+                raise HTTPException(status_code=400, detail="invalid status (OPEN/IN_PROGRESS/CLOSED)")
+            if "status" in cols:
+                where.append("status=%s")
+                params.append(status)
+
+        if log_id is not None and "log_id" in cols:
+            where.append("log_id=%s")
+            params.append(int(log_id))
+
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
+        allowed_sort = [c for c in ["created_at", "reviewed_at", "status", "log_id", "review_id"] if c in cols]
+        if sort not in allowed_sort:
+            sort = allowed_sort[0] if allowed_sort else "review_id"
+
+        if (dir or "").lower() not in ("asc", "desc"):
+            dir = "desc"
+
+        order_sql = f"ORDER BY {sort} {dir.upper()}"
+
+        count_sql = f"SELECT COUNT(*) AS cnt FROM review_event {where_sql}"
+        data_sql = f"SELECT * FROM review_event {where_sql} {order_sql} LIMIT %s OFFSET %s"
+
+        with conn.cursor() as cur:
+            cur.execute(count_sql, params)
+            total = int(cur.fetchone()["cnt"])
+
+            cur.execute(data_sql, params + [limit, offset])
+            rows = cur.fetchall()
+
+    return {"items": rows, "total": total, "limit": limit, "offset": offset, "sort": sort, "dir": dir}
+
+
+@app.get("/v1/review-events/{review_id}")
+@app.get("/review-events/{review_id}")
+@app.get("/v1/incidents/{review_id}")  # backward alias
+@app.get("/incidents/{review_id}")     # backward alias
+def get_review_event(review_id: int, include_log: bool = Query(True)):
+    with db_conn() as conn:
+        ev = _get_review_event_by_id(conn, review_id)
+        if not include_log:
+            return {"review_event": ev}
+
+        log_id = ev.get("log_id")
+        log = _get_access_log(conn, int(log_id)) if log_id is not None else None
+        return {"review_event": ev, "log": log}
+
+
+@app.get("/v1/review-events/by-log/{log_id}")
+@app.get("/review-events/by-log/{log_id}")
+@app.get("/v1/incidents/by-log/{log_id}")  # backward alias
+@app.get("/incidents/by-log/{log_id}")     # backward alias
+def get_review_event_by_log(log_id: int):
+    with db_conn() as conn:
+        ev = _get_review_event_by_log(conn, int(log_id))
+        return {"review_event": ev}
+
+@app.post("/v1/review-events")
+@app.post("/review-events")
+@app.post("/v1/incidents")  # backward alias
+@app.post("/incidents")     # backward alias
+def create_review_event(req: ReviewEventCreateRequest):
+    with db_conn() as conn:
+        # 1) access_log 존재 확인 (설계서 기준: review_event.log_id FK 성격)
+        log = _get_access_log(conn, int(req.log_id))
+
+        cols = _get_table_cols(conn, "review_event")
+        _ = _review_id_col(conn)
+
+        if req.proposed_action is not None and req.proposed_action not in REVIEW_ALLOWED_ACTION:
+            raise HTTPException(
+                status_code=400,
+                detail="invalid proposed_action (ALLOW/BLOCK/CREATE_POLICY/UPDATE_POLICY/NO_ACTION)",
+            )
+
+        # 2) 운영 정책(추천): log_id당 OPEN/IN_PROGRESS는 1개만 허용
+        #    이미 있으면 새로 만들지 않고 기존 티켓을 반환(옵션 A)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM review_event
+                WHERE log_id=%s AND status IN (%s, %s)
+                ORDER BY review_id DESC
+                LIMIT 1
+                """,
+                (int(req.log_id), REVIEW_STATUS_OPEN, REVIEW_STATUS_IN_PROGRESS),
+            )
+            existing = cur.fetchone()
+
+        if existing:
+            # 기존 OPEN/IN_PROGRESS 티켓 반환
+            return {"review_event": existing, "log": log}
+
+        # 3) 없으면 새로 생성
+        payload = {
+            "log_id": int(req.log_id),
+            "status": REVIEW_STATUS_OPEN,
+            "proposed_action": req.proposed_action,
+            "reviewer_id": req.reviewer_id,
+            "note": (req.note[:255] if req.note else None),
+            "created_at": _now_str(),
+            "reviewed_at": None,
+            "generated_policy_id": None,
+        }
+        payload = _filter_payload_by_cols(payload, cols)
+
+        with conn.cursor() as cur:
+            new_id = _insert_dynamic(cur, "review_event", payload)
+
+        ev = _get_review_event_by_id(conn, new_id)
+        return {"review_event": ev, "log": log}
+
+@app.patch("/v1/review-events/{review_id}")
+@app.patch("/review-events/{review_id}")
+@app.patch("/v1/incidents/{review_id}")  # backward alias
+@app.patch("/incidents/{review_id}")     # backward alias
+def patch_review_event(review_id: int, req: ReviewEventPatchRequest):
+    with db_conn() as conn:
+        cols = _get_table_cols(conn, "review_event")
+        id_col = _review_id_col(conn)
+
+        _ = _get_review_event_by_id(conn, review_id)
+
+        payload = {}
+
+        if req.status is not None:
+            if req.status not in REVIEW_ALLOWED_STATUS:
+                raise HTTPException(status_code=400, detail="invalid status (OPEN/IN_PROGRESS/CLOSED)")
+            if "status" in cols:
+                payload["status"] = req.status
+            if req.status == REVIEW_STATUS_CLOSED and "reviewed_at" in cols:
+                payload["reviewed_at"] = _now_str()
+
+        if req.proposed_action is not None:
+            if req.proposed_action not in REVIEW_ALLOWED_ACTION:
+                raise HTTPException(
+                    status_code=400,
+                    detail="invalid proposed_action (ALLOW/BLOCK/CREATE_POLICY/UPDATE_POLICY/NO_ACTION)",
+                )
+            if "proposed_action" in cols:
+                payload["proposed_action"] = req.proposed_action
+
+        if req.note is not None and "note" in cols:
+            payload["note"] = req.note[:255]
+
+        if req.reviewer_id is not None and "reviewer_id" in cols:
+            payload["reviewer_id"] = int(req.reviewer_id)
+
+        if "updated_at" in cols:
+            payload["updated_at"] = _now_str()
+
+        with conn.cursor() as cur:
+            _update_dynamic(cur, "review_event", id_col, review_id, payload)
+
+        ev = _get_review_event_by_id(conn, review_id)
+        return {"review_event": ev}
+
+
+@app.post("/v1/review-events/{review_id}/actions/create-policy")
+@app.post("/review-events/{review_id}/actions/create-policy")
+@app.post("/v1/incidents/{review_id}/actions/create-policy")  # backward alias
+@app.post("/incidents/{review_id}/actions/create-policy")     # backward alias
+def create_policy_from_review_event(review_id: int, body: Optional[CreatePolicyFromReviewRequest] = None):
+    """
+    review_event 기반 policy + policy_rule 생성, policy_audit.source_review_id로 연결,
+    review_event.generated_policy_id 갱신 + CLOSED 처리.
+    """
+    conn = db_conn()
+    try:
+        conn.autocommit(False)
+        with conn.cursor() as cur:
+            ev = _get_review_event_by_id(conn, review_id)
+            log = _get_access_log(conn, int(ev["log_id"]))
+
+            if ev.get("proposed_action") and ev.get("proposed_action") != REVIEW_ACTION_CREATE_POLICY:
+                raise HTTPException(status_code=400, detail="proposed_action is not CREATE_POLICY")
+
+            policy_id = _create_policy_from_review_tx(cur, conn, ev, log, override=body)
+            conn.commit()
+
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM policy WHERE policy_id=%s", (policy_id,))
+            pol = cur.fetchone()
+
+        updated_ev = _get_review_event_by_id(conn, review_id)
+        return {"policy_id": policy_id, "policy": pol, "review_event": updated_ev}
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"create-policy failed: {str(e)}")
+    finally:
+        conn.autocommit(True)
+        conn.close()
+
+
+@app.post("/v1/review-events/{review_id}/resolve")
+@app.post("/review-events/{review_id}/resolve")
+@app.post("/v1/incidents/{review_id}/resolve")  # backward alias
+@app.post("/incidents/{review_id}/resolve")     # backward alias
+def resolve_review_event(review_id: int, req: ResolveReviewRequest):
+    """
+    설계서: CLOSED 시 reviewed_at 기록.
+    옵션: create_policy=True면 resolve 과정에서 policy 생성까지 수행하고 연결.
+    """
+    conn = db_conn()
+    try:
+        conn.autocommit(False)
+        with conn.cursor() as cur:
+            ev = _get_review_event_by_id(conn, review_id)
+            log = _get_access_log(conn, int(ev["log_id"]))
+
+            created_policy_id = None
+            if req.create_policy:
+                created_policy_id = _create_policy_from_review_tx(
+                    cur,
+                    conn,
+                    ev,
+                    log,
+                    override=req.policy_override,
+                )
+
+            cols = _get_table_cols(conn, "review_event")
+            upd = {}
+
+            if "status" in cols:
+                upd["status"] = REVIEW_STATUS_CLOSED
+            if "reviewed_at" in cols:
+                upd["reviewed_at"] = _now_str()
+            if req.reviewer_id is not None and "reviewer_id" in cols:
+                upd["reviewer_id"] = int(req.reviewer_id)
+            if req.note is not None and "note" in cols:
+                upd["note"] = req.note[:255]
+            if "updated_at" in cols:
+                upd["updated_at"] = _now_str()
+
+            if upd:
+                _update_dynamic(cur, "review_event", "review_id", review_id, upd)
+
+            conn.commit()
+
+        updated_ev = _get_review_event_by_id(conn, review_id)
+        return {"review_event": updated_ev, "created_policy_id": created_policy_id}
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"resolve failed: {str(e)}")
+    finally:
+        conn.autocommit(True)
+        conn.autocommit(True)
+        conn.close()
+
+
+# =========================
+# AI Scoring (existing)
+# =========================
 
 class ScoreRequest(BaseModel):
     request_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -157,7 +757,7 @@ def list_logs(
     if sort not in allowed_sort:
         sort = "detect_timestamp"
 
-    if dir.lower() not in ("asc", "desc"):
+    if (dir or "").lower() not in ("asc", "desc"):
         dir = "desc"
 
     order_sql = f"ORDER BY al.{sort} {dir.upper()}"
