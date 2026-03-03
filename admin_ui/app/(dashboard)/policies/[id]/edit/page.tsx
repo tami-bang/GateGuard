@@ -1,6 +1,6 @@
 "use client"
 
-import { use, useMemo, useState } from "react"
+import { use, useEffect, useMemo, useState } from "react"
 import Link from "next/link"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -10,9 +10,24 @@ import { Textarea } from "@/components/ui/textarea"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { Badge } from "@/components/ui/badge"
-import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from "@/components/ui/breadcrumb"
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbLink,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb"
 import { ArrowLeft, Plus, Trash2, GripVertical, Info } from "lucide-react"
-import { mockPolicies, mockPolicyRules } from "@/lib/mock-data"
+
+import {
+  apiGetPolicy,
+  apiListPolicyRules,
+  apiPatchPolicy,
+  toBool,
+  type Policy,
+  type PolicyRule,
+} from "@/lib/api-client"
 
 interface RuleForm {
   id: string
@@ -22,6 +37,7 @@ interface RuleForm {
   is_case_sensitive: boolean
   is_negated: boolean
   is_enabled: boolean
+  rule_order?: number
 }
 
 const matchExamples: Record<string, string> = {
@@ -31,43 +47,105 @@ const matchExamples: Record<string, string> = {
   REGEX: "e.g. .*\\.evil\\.(net|com)",
 }
 
+function normalizeRule(r: PolicyRule): RuleForm {
+  return {
+    id: String(r.rule_id),
+    rule_type: String(r.rule_type),
+    match_type: String(r.match_type),
+    pattern: String(r.pattern ?? ""),
+    is_case_sensitive: toBool(r.is_case_sensitive),
+    is_negated: toBool(r.is_negated),
+    is_enabled: r.is_enabled === null ? true : toBool(r.is_enabled),
+    rule_order: typeof r.rule_order === "number" ? r.rule_order : undefined,
+  }
+}
+
 export default function PolicyEditPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params)
-  const existing = useMemo(() => mockPolicies.find(p => p.policy_id === id), [id])
-  const existingRules = useMemo(() => mockPolicyRules.filter(r => r.policy_id === id).sort((a, b) => a.rule_order - b.rule_order), [id])
+  const policyId = useMemo(() => Number(id), [id])
 
-  const [policy, setPolicy] = useState(() => existing ? {
-    policy_name: existing.policy_name,
-    policy_type: existing.policy_type,
-    action: existing.action,
-    priority: existing.priority,
-    is_enabled: existing.is_enabled,
-    risk_level: existing.risk_level,
-    category: existing.category,
-    block_status_code: existing.block_status_code || 403,
-    redirect_url: existing.redirect_url || "",
-    description: existing.description,
-  } : {
-    policy_name: "", policy_type: "BLOCKLIST", action: "BLOCK", priority: 100,
-    is_enabled: true, risk_level: "MEDIUM", category: "", block_status_code: 403,
-    redirect_url: "", description: "",
-  })
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
-  const [rules, setRules] = useState<RuleForm[]>(() =>
-    existingRules.length > 0 ? existingRules.map(r => ({
-      id: r.rule_id, rule_type: r.rule_type, match_type: r.match_type, pattern: r.pattern,
-      is_case_sensitive: r.is_case_sensitive, is_negated: r.is_negated, is_enabled: r.is_enabled,
-    })) : [{ id: "new-1", rule_type: "HOST", match_type: "EXACT", pattern: "", is_case_sensitive: false, is_negated: false, is_enabled: true }]
-  )
+  const [existing, setExisting] = useState<Policy | null>(null)
 
-  if (!existing) {
-    return (
-      <div className="flex flex-col items-center justify-center gap-4 py-20">
-        <p className="text-muted-foreground">Policy not found</p>
-        <Link href="/policies"><Button variant="outline" size="sm">Back to Policies</Button></Link>
-      </div>
-    )
-  }
+  const [policy, setPolicy] = useState(() => ({
+    policy_name: "",
+    policy_type: "BLOCKLIST",
+    action: "BLOCK",
+    priority: 100,
+    is_enabled: true as boolean,
+    risk_level: "MEDIUM",
+    category: "",
+    block_status_code: 403,
+    redirect_url: "",
+    description: "",
+  }))
+
+  const [rules, setRules] = useState<RuleForm[]>([
+    { id: "new-1", rule_type: "HOST", match_type: "EXACT", pattern: "", is_case_sensitive: false, is_negated: false, is_enabled: true },
+  ])
+
+  useEffect(() => {
+    let alive = true
+    async function run() {
+      if (!Number.isFinite(policyId) || policyId <= 0) {
+        setError("Invalid policy id")
+        setLoading(false)
+        return
+      }
+      setLoading(true)
+      setError(null)
+      try {
+        const polResp = await apiGetPolicy(policyId)
+        const pol = polResp?.policy ?? null
+        if (!alive) return
+
+        if (!pol) {
+          setExisting(null)
+          setError("Policy not found")
+          return
+        }
+
+        setExisting(pol)
+
+        setPolicy({
+          policy_name: pol.policy_name ?? "",
+          policy_type: String(pol.policy_type ?? "BLOCKLIST"),
+          action: String(pol.action ?? "BLOCK"),
+          priority: pol.priority ?? 100,
+          is_enabled: toBool(pol.is_enabled),
+          risk_level: (pol.risk_level ?? "MEDIUM") as any,
+          category: pol.category ?? "",
+          block_status_code: pol.block_status_code ?? 403,
+          redirect_url: pol.redirect_url ?? "",
+          description: pol.description ?? "",
+        })
+
+        const rulesResp = await apiListPolicyRules(policyId)
+        const items = Array.isArray(rulesResp?.items) ? rulesResp.items : []
+        if (!alive) return
+
+        const normalized = items.map(normalizeRule)
+        setRules(
+          normalized.length > 0
+            ? normalized
+            : [{ id: "new-1", rule_type: "HOST", match_type: "EXACT", pattern: "", is_case_sensitive: false, is_negated: false, is_enabled: true }]
+        )
+      } catch (e: any) {
+        if (!alive) return
+        setError(e?.message ? String(e.message) : "Failed to load policy")
+      } finally {
+        if (!alive) return
+        setLoading(false)
+      }
+    }
+    run()
+    return () => {
+      alive = false
+    }
+  }, [policyId])
 
   function addRule() {
     setRules(r => [...r, { id: `new-${Date.now()}`, rule_type: "HOST", match_type: "EXACT", pattern: "", is_case_sensitive: false, is_negated: false, is_enabled: true }])
@@ -78,7 +156,64 @@ export default function PolicyEditPage({ params }: { params: Promise<{ id: strin
   }
 
   function updateRule(ruleId: string, field: string, value: unknown) {
-    setRules(r => r.map(rule => rule.id === ruleId ? { ...rule, [field]: value } : rule))
+    setRules(r => r.map(rule => (rule.id === ruleId ? { ...rule, [field]: value } : rule)))
+  }
+
+  async function saveChanges() {
+    if (!existing) return
+    setSaving(true)
+    setError(null)
+    try {
+      await apiPatchPolicy(policyId, {
+        policy_name: policy.policy_name,
+        policy_type: policy.policy_type,
+        action: policy.action,
+        priority: policy.priority,
+        is_enabled: policy.is_enabled ? 1 : 0,
+        risk_level: policy.risk_level,
+        category: policy.category,
+        block_status_code: policy.block_status_code,
+        redirect_url: policy.redirect_url,
+        description: policy.description,
+      })
+
+      // rules 저장은 현재 FastAPI에 업데이트 API가 없음.
+      // (GET rules만 있고, PUT/PATCH rules 엔드포인트 없음)
+      // 그래서 현재는 "정책 메타만 저장"이 정상 동작 범위.
+
+      const polResp = await apiGetPolicy(policyId)
+      setExisting(polResp?.policy ?? existing)
+    } catch (e: any) {
+      setError(e?.message ? String(e.message) : "Save failed")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-3 py-20">
+        <p className="text-muted-foreground text-sm">Loading...</p>
+      </div>
+    )
+  }
+
+  if (error && !existing) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-4 py-20">
+        <p className="text-muted-foreground">{error}</p>
+        <Link href="/policies"><Button variant="outline" size="sm">Back to Policies</Button></Link>
+      </div>
+    )
+  }
+
+  if (!existing) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-4 py-20">
+        <p className="text-muted-foreground">Policy not found</p>
+        <Link href="/policies"><Button variant="outline" size="sm">Back to Policies</Button></Link>
+      </div>
+    )
   }
 
   return (
@@ -105,13 +240,20 @@ export default function PolicyEditPage({ params }: { params: Promise<{ id: strin
         </div>
         <div className="flex items-center gap-2">
           <Link href={`/policies/${id}`}><Button variant="outline" size="sm" className="h-8 text-xs">Cancel</Button></Link>
-          <Button size="sm" className="h-8 text-xs">Save Changes</Button>
+          <Button size="sm" className="h-8 text-xs" onClick={saveChanges} disabled={saving}>
+            {saving ? "Saving..." : "Save Changes"}
+          </Button>
         </div>
       </div>
 
+      {error ? (
+        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          {error}
+        </div>
+      ) : null}
+
       <div className="grid gap-4 lg:grid-cols-3">
         <div className="flex flex-col gap-4 lg:col-span-2">
-          {/* Policy Settings */}
           <Card className="border shadow-sm">
             <CardHeader className="pb-2">
               <CardTitle className="text-sm font-semibold text-foreground">Policy Settings</CardTitle>
@@ -127,6 +269,7 @@ export default function PolicyEditPage({ params }: { params: Promise<{ id: strin
                   <Input value={policy.category} onChange={e => setPolicy(p => ({ ...p, category: e.target.value }))} className="h-8 text-sm" />
                 </div>
               </div>
+
               <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
                 <div className="flex flex-col gap-1.5">
                   <Label className="text-xs font-medium text-foreground">Type</Label>
@@ -139,6 +282,7 @@ export default function PolicyEditPage({ params }: { params: Promise<{ id: strin
                     </SelectContent>
                   </Select>
                 </div>
+
                 <div className="flex flex-col gap-1.5">
                   <Label className="text-xs font-medium text-foreground">Action</Label>
                   <Select value={policy.action} onValueChange={v => setPolicy(p => ({ ...p, action: v }))}>
@@ -151,10 +295,12 @@ export default function PolicyEditPage({ params }: { params: Promise<{ id: strin
                     </SelectContent>
                   </Select>
                 </div>
+
                 <div className="flex flex-col gap-1.5">
                   <Label className="text-xs font-medium text-foreground">Priority</Label>
                   <Input type="number" value={policy.priority} onChange={e => setPolicy(p => ({ ...p, priority: Number(e.target.value) }))} className="h-8 text-sm" />
                 </div>
+
                 <div className="flex flex-col gap-1.5">
                   <Label className="text-xs font-medium text-foreground">Risk Level</Label>
                   <Select value={policy.risk_level} onValueChange={v => setPolicy(p => ({ ...p, risk_level: v }))}>
@@ -168,10 +314,12 @@ export default function PolicyEditPage({ params }: { params: Promise<{ id: strin
                   </Select>
                 </div>
               </div>
+
               <div className="flex flex-col gap-1.5">
                 <Label className="text-xs font-medium text-foreground">Description</Label>
                 <Textarea value={policy.description} onChange={e => setPolicy(p => ({ ...p, description: e.target.value }))} className="min-h-[60px] resize-none text-sm" />
               </div>
+
               <div className="flex items-center gap-3">
                 <Switch checked={policy.is_enabled} onCheckedChange={v => setPolicy(p => ({ ...p, is_enabled: v }))} />
                 <Label className="text-xs text-foreground">Policy Enabled</Label>
@@ -179,7 +327,6 @@ export default function PolicyEditPage({ params }: { params: Promise<{ id: strin
             </CardContent>
           </Card>
 
-          {/* Rules */}
           <Card className="border shadow-sm">
             <CardHeader className="pb-2">
               <div className="flex items-center justify-between">
@@ -205,6 +352,7 @@ export default function PolicyEditPage({ params }: { params: Promise<{ id: strin
                       </Button>
                     </div>
                   </div>
+
                   <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
                     <div className="flex flex-col gap-1">
                       <label className="text-[11px] font-medium text-muted-foreground">Rule Type</label>
@@ -217,6 +365,7 @@ export default function PolicyEditPage({ params }: { params: Promise<{ id: strin
                         </SelectContent>
                       </Select>
                     </div>
+
                     <div className="flex flex-col gap-1">
                       <label className="text-[11px] font-medium text-muted-foreground">Match Type</label>
                       <Select value={rule.match_type} onValueChange={v => updateRule(rule.id, "match_type", v)}>
@@ -229,6 +378,7 @@ export default function PolicyEditPage({ params }: { params: Promise<{ id: strin
                         </SelectContent>
                       </Select>
                     </div>
+
                     <div className="col-span-2 flex flex-col gap-1">
                       <label className="text-[11px] font-medium text-muted-foreground">Pattern</label>
                       <div className="relative">
@@ -242,6 +392,7 @@ export default function PolicyEditPage({ params }: { params: Promise<{ id: strin
                       </div>
                     </div>
                   </div>
+
                   <div className="mt-2 flex items-center gap-4">
                     <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
                       <Switch checked={rule.is_case_sensitive} onCheckedChange={v => updateRule(rule.id, "is_case_sensitive", v)} className="scale-[0.6]" />
@@ -252,13 +403,16 @@ export default function PolicyEditPage({ params }: { params: Promise<{ id: strin
                       Negated
                     </label>
                   </div>
+
+                  <div className="mt-2 text-[11px] text-muted-foreground">
+                    Rules save is not wired yet (no FastAPI endpoint for updating policy_rule).
+                  </div>
                 </div>
               ))}
             </CardContent>
           </Card>
         </div>
 
-        {/* Sidebar */}
         <div className="flex flex-col gap-4">
           <Card className="border shadow-sm">
             <CardHeader className="pb-2">

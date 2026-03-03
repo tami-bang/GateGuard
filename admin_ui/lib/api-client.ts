@@ -88,7 +88,6 @@ export type ReviewEvent = {
   created_at: string | null
   reviewed_at: string | null
   generated_policy_id: number | null
-  updated_at?: string | null
 }
 
 export type CreateIncidentRequest = {
@@ -124,6 +123,80 @@ export type CreatePolicyFromIncidentResponse = {
 }
 
 /**
+ * Policy types (DB: policy / policy_rule)
+ * - 너 DB 스키마 기준: is_enabled 컬럼 사용
+ */
+export type PolicyType = "ALLOWLIST" | "BLOCKLIST" | "MONITOR" | string
+export type PolicyAction = "ALLOW" | "BLOCK" | "REDIRECT" | "REVIEW" | string
+export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL" | string
+
+export type Policy = {
+  policy_id: number
+  policy_name: string
+  policy_type: PolicyType
+  action: PolicyAction
+  priority: number | null
+  is_enabled: number | boolean | null
+  risk_level: RiskLevel | null
+  category: string | null
+  block_status_code: number | null
+  redirect_url: string | null
+  description: string | null
+  created_by: number
+  created_at: string | null
+  updated_at: string | null
+  updated_by: number | null
+}
+
+export type PolicyRule = {
+  rule_id: number
+  policy_id: number
+  rule_order: number
+  rule_type: string
+  match_type: string
+  pattern: string
+  is_case_sensitive: number | boolean | null
+  is_negated: number | boolean | null
+  is_enabled: number | boolean | null
+}
+
+export type GetPolicyResponse = { policy: Policy | null }
+export type ListPolicyRulesResponse = { items: PolicyRule[] }
+
+/**
+ * Policy PATCH (policy 메타 수정)
+ * - FastAPI: PATCH /v1/policies/{policy_id}
+ */
+export type PatchPolicyRequest = Partial<
+  Pick<
+    Policy,
+    | "policy_name"
+    | "policy_type"
+    | "action"
+    | "priority"
+    | "is_enabled"
+    | "risk_level"
+    | "category"
+    | "block_status_code"
+    | "redirect_url"
+    | "description"
+  >
+>
+
+export type PatchPolicyResponse = { policy: Policy }
+
+/**
+ * Incident detail response (권장)
+ * - UI는 incident만으로 host/path/decision을 알 수 없어서 log를 같이 받아야 함
+ */
+export type IncidentDetailResponse = {
+  review_event: ReviewEvent
+  log: AccessLogItem | null
+  analyses?: AIAnalysisItem[]
+  policy?: Policy | null
+}
+
+/**
  * Base URL 규칙
  * 1) NEXT_PUBLIC_FASTAPI_BASE_URL 있으면 사용
  * 2) 브라우저면 "현재 UI 접속 호스트:8000" 자동 추론
@@ -152,8 +225,38 @@ function buildQuery(params: Record<string, string | number | undefined | null>):
   return s ? `?${s}` : ""
 }
 
+/**
+ * 로그인 유저 ID 캐시 (브라우저에서만)
+ * - Next API(/api/auth/me)에서 SSOT로 받아온다.
+ */
+let _cachedUserId: string | null = null
+let _fetchingUserId: Promise<string | null> | null = null
+
+async function getUserIdFromSession(): Promise<string | null> {
+  if (typeof window === "undefined") return null
+  if (_cachedUserId) return _cachedUserId
+  if (_fetchingUserId) return await _fetchingUserId
+
+  _fetchingUserId = (async () => {
+    try {
+      const res = await fetch("/api/auth/me", { method: "GET", cache: "no-store" })
+      if (!res.ok) return null
+      const data = await res.json().catch(() => null)
+      const id = data?.user?.id
+      if (id === undefined || id === null || id === "") return null
+      _cachedUserId = String(id)
+      return _cachedUserId
+    } finally {
+      _fetchingUserId = null
+    }
+  })()
+
+  return await _fetchingUserId
+}
+
 async function httpJson<T>(path: string, init?: RequestInit): Promise<T> {
   const url = `${getBaseUrl()}${path}`
+  const userId = await getUserIdFromSession()
 
   const res = await fetch(url, {
     ...init,
@@ -162,6 +265,7 @@ async function httpJson<T>(path: string, init?: RequestInit): Promise<T> {
     credentials: "include",
     headers: {
       "Content-Type": "application/json",
+      ...(userId ? { "X-User-Id": String(userId) } : {}),
       ...(init?.headers ?? {}),
     },
   })
@@ -202,15 +306,10 @@ export async function apiListLogs(params: {
 export async function apiGetLogDetail(logId: number): Promise<LogDetail> {
   const data = await httpJson<LogDetailRespA | LogDetailRespB>(`/v1/logs/${logId}`)
 
-  // A) {log, analyses}
   if ("log" in data) {
-    return {
-      log: data.log,
-      analyses: Array.isArray(data.analyses) ? data.analyses : [],
-    }
+    return { log: data.log, analyses: Array.isArray(data.analyses) ? data.analyses : [] }
   }
 
-  // B) {...logFields, analyses}
   return {
     log: data as AccessLogItem,
     analyses: Array.isArray((data as any).analyses) ? (data as any).analyses : [],
@@ -219,10 +318,17 @@ export async function apiGetLogDetail(logId: number): Promise<LogDetail> {
 
 /**
  * Incident APIs (alias: /v1/incidents == /v1/review-events)
- * - 데모/운영은 incidents 경로를 UI에서 쓰는 게 직관적이라 incidents로 통일
  */
 export async function apiGetIncidentByLog(logId: number): Promise<GetIncidentByLogResponse> {
   return await httpJson<GetIncidentByLogResponse>(`/v1/incidents/by-log/${logId}`)
+}
+
+/**
+ * Incident detail (권장: 백엔드가 review_event + access_log join해서 주는 엔드포인트)
+ * - 현재 백엔드에 없다면 404가 날 수 있음
+ */
+export async function apiGetIncident(reviewId: number): Promise<IncidentDetailResponse> {
+  return await httpJson<IncidentDetailResponse>(`/v1/incidents/${reviewId}`)
 }
 
 export async function apiCreateIncident(req: CreateIncidentRequest): Promise<CreateIncidentResponse> {
@@ -247,4 +353,40 @@ export async function apiCreatePolicyFromIncident(
     method: "POST",
     body: JSON.stringify(req ?? {}),
   })
+}
+
+/**
+ * Policy APIs
+ * - 아래 2개 엔드포인트는 FastAPI에 있어야 동작함:
+ *   GET /v1/policies/{policy_id}
+ *   GET /v1/policies/{policy_id}/rules
+ *   PATCH /v1/policies/{policy_id}
+ */
+export async function apiGetPolicy(policyId: number): Promise<GetPolicyResponse> {
+  return await httpJson<GetPolicyResponse>(`/v1/policies/${policyId}`)
+}
+
+export async function apiListPolicyRules(policyId: number): Promise<ListPolicyRulesResponse> {
+  return await httpJson<ListPolicyRulesResponse>(`/v1/policies/${policyId}/rules`)
+}
+
+export async function apiPatchPolicy(policyId: number, req: PatchPolicyRequest): Promise<PatchPolicyResponse> {
+  return await httpJson<PatchPolicyResponse>(`/v1/policies/${policyId}`, {
+    method: "PATCH",
+    body: JSON.stringify(req),
+  })
+}
+
+/** number | boolean | null -> boolean */
+export function toBool(v: any): boolean {
+  if (v === true) return true
+  if (v === false) return false
+  if (v === 1) return true
+  if (v === 0) return false
+  if (typeof v === "string") {
+    const s = v.toLowerCase().trim()
+    if (s === "1" || s === "true" || s === "y" || s === "yes") return true
+    if (s === "0" || s === "false" || s === "n" || s === "no") return false
+  }
+  return Boolean(v)
 }

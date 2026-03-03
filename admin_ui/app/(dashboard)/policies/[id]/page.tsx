@@ -1,7 +1,9 @@
 "use client"
 
-import { use, useMemo } from "react"
+import { useEffect, useMemo, useState } from "react"
 import Link from "next/link"
+import { useParams, useRouter } from "next/navigation"
+
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -9,8 +11,15 @@ import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { StatusChip } from "@/components/status-chip"
 import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from "@/components/ui/breadcrumb"
-import { ArrowLeft, Edit, Trash2 } from "lucide-react"
-import { mockPolicies, mockPolicyRules } from "@/lib/mock-data"
+import { ArrowLeft, Edit, Trash2, Loader2 } from "lucide-react"
+
+import {
+  apiGetPolicy,
+  apiListPolicyRules,
+  toBool,
+  type Policy,
+  type PolicyRule,
+} from "@/lib/api-client"
 
 const riskColors: Record<string, string> = {
   CRITICAL: "bg-red-50 text-red-700 border-red-200",
@@ -19,16 +28,74 @@ const riskColors: Record<string, string> = {
   LOW: "bg-emerald-50 text-emerald-700 border-emerald-200",
 }
 
-export default function PolicyDetailPage({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = use(params)
-  const policy = useMemo(() => mockPolicies.find(p => p.policy_id === id), [id])
-  const rules = useMemo(() => mockPolicyRules.filter(r => r.policy_id === id).sort((a, b) => a.rule_order - b.rule_order), [id])
+function fmtDate(ts: string | null | undefined): string {
+  if (!ts) return "N/A"
+  const d = new Date(ts)
+  if (Number.isNaN(d.getTime())) return ts
+  return d.toLocaleString()
+}
 
-  if (!policy) {
+export default function PolicyDetailPage() {
+  const params = useParams<{ id: string }>()
+  const router = useRouter()
+  const policyId = Number(params?.id)
+
+  const [loading, setLoading] = useState(true)
+  const [err, setErr] = useState<string | null>(null)
+  const [policy, setPolicy] = useState<Policy | null>(null)
+  const [rules, setRules] = useState<PolicyRule[]>([])
+
+  useEffect(() => {
+    let alive = true
+    async function run() {
+      if (!Number.isFinite(policyId)) {
+        setErr("Invalid policy id")
+        setLoading(false)
+        return
+      }
+      setLoading(true)
+      setErr(null)
+      try {
+        const p = await apiGetPolicy(policyId)
+        if (!alive) return
+        setPolicy(p.policy ?? null)
+
+        const r = await apiListPolicyRules(policyId).catch(() => ({ items: [] as PolicyRule[] }))
+        if (!alive) return
+        setRules((r.items ?? []).slice().sort((a, b) => (a.rule_order ?? 0) - (b.rule_order ?? 0)))
+      } catch (e: any) {
+        if (!alive) return
+        setErr(e?.message ?? "Failed to load policy")
+      } finally {
+        if (!alive) return
+        setLoading(false)
+      }
+    }
+    run()
+    return () => {
+      alive = false
+    }
+  }, [policyId])
+
+  const enabled = useMemo(() => (policy ? toBool(policy.is_enabled) : false), [policy])
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 py-10 text-sm text-muted-foreground">
+        <Loader2 className="size-4 animate-spin" />
+        Loading policy...
+      </div>
+    )
+  }
+
+  if (err || !policy) {
     return (
       <div className="flex flex-col items-center justify-center gap-4 py-20">
-        <p className="text-muted-foreground">Policy not found</p>
-        <Link href="/policies"><Button variant="outline" size="sm">Back to Policies</Button></Link>
+        <p className="text-muted-foreground">{err ?? "Policy not found"}</p>
+        <div className="flex gap-2">
+          <Link href="/policies"><Button variant="outline" size="sm">Back to Policies</Button></Link>
+          <Button variant="outline" size="sm" onClick={() => router.refresh()}>Refresh</Button>
+        </div>
       </div>
     )
   }
@@ -53,15 +120,19 @@ export default function PolicyDetailPage({ params }: { params: Promise<{ id: str
           <div>
             <div className="flex items-center gap-2">
               <h1 className="text-xl font-semibold text-foreground">{policy.policy_name}</h1>
-              <Badge variant={policy.is_enabled ? "default" : "secondary"} className={`text-[10px] ${policy.is_enabled ? "bg-success text-white border-0" : ""}`}>
-                {policy.is_enabled ? "Enabled" : "Disabled"}
+              <Badge
+                variant={enabled ? "default" : "secondary"}
+                className={`text-[10px] ${enabled ? "bg-success text-white border-0" : ""}`}
+              >
+                {enabled ? "Enabled" : "Disabled"}
               </Badge>
             </div>
             <p className="font-mono text-xs text-muted-foreground">{policy.policy_id}</p>
           </div>
         </div>
+
         <div className="flex items-center gap-2">
-          <Link href={`/policies/${id}/edit`}>
+          <Link href={`/policies/${policy.policy_id}/edit`}>
             <Button variant="outline" size="sm" className="h-8 gap-1.5 text-xs">
               <Edit className="size-3.5" /> Edit
             </Button>
@@ -73,7 +144,6 @@ export default function PolicyDetailPage({ params }: { params: Promise<{ id: str
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        {/* Policy Metadata */}
         <Card className="border shadow-sm">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-semibold text-foreground">Policy Metadata</CardTitle>
@@ -90,19 +160,19 @@ export default function PolicyDetailPage({ params }: { params: Promise<{ id: str
               </div>
               <div>
                 <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Priority</dt>
-                <dd className="mt-0.5 text-xs font-mono font-semibold text-foreground">{policy.priority}</dd>
+                <dd className="mt-0.5 text-xs font-mono font-semibold text-foreground">{policy.priority ?? "N/A"}</dd>
               </div>
               <div>
                 <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Risk Level</dt>
                 <dd className="mt-0.5">
-                  <span className={`inline-flex rounded border px-1.5 py-0.5 text-[11px] font-semibold ${riskColors[policy.risk_level] || ""}`}>
-                    {policy.risk_level}
+                  <span className={`inline-flex rounded border px-1.5 py-0.5 text-[11px] font-semibold ${riskColors[policy.risk_level ?? ""] || ""}`}>
+                    {policy.risk_level ?? "N/A"}
                   </span>
                 </dd>
               </div>
               <div>
                 <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Category</dt>
-                <dd className="mt-0.5 text-xs text-foreground">{policy.category}</dd>
+                <dd className="mt-0.5 text-xs text-foreground">{policy.category ?? "N/A"}</dd>
               </div>
               <div>
                 <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Created By</dt>
@@ -110,23 +180,25 @@ export default function PolicyDetailPage({ params }: { params: Promise<{ id: str
               </div>
               <div>
                 <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Created</dt>
-                <dd className="mt-0.5 text-xs text-foreground">{new Date(policy.created_at).toLocaleDateString()}</dd>
+                <dd className="mt-0.5 text-xs text-foreground">{fmtDate(policy.created_at)}</dd>
               </div>
               <div>
                 <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Last Updated</dt>
-                <dd className="mt-0.5 text-xs text-foreground">{new Date(policy.updated_at).toLocaleDateString()} by {policy.updated_by}</dd>
+                <dd className="mt-0.5 text-xs text-foreground">
+                  {fmtDate(policy.updated_at)} {policy.updated_by ? `by ${policy.updated_by}` : ""}
+                </dd>
               </div>
             </dl>
-            {policy.description && (
+
+            {policy.description ? (
               <div className="mt-4">
                 <p className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider mb-1">Description</p>
                 <p className="text-xs text-foreground leading-relaxed">{policy.description}</p>
               </div>
-            )}
+            ) : null}
           </CardContent>
         </Card>
 
-        {/* Block Response Config */}
         <Card className="border shadow-sm">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-semibold text-foreground">Block Response Configuration</CardTitle>
@@ -135,22 +207,22 @@ export default function PolicyDetailPage({ params }: { params: Promise<{ id: str
             <dl className="grid grid-cols-1 gap-y-3 text-sm">
               <div>
                 <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Block Status Code</dt>
-                <dd className="mt-0.5 text-xs font-mono text-foreground">{policy.block_status_code || "N/A"}</dd>
+                <dd className="mt-0.5 text-xs font-mono text-foreground">{policy.block_status_code ?? "N/A"}</dd>
               </div>
               <div>
                 <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Redirect URL</dt>
-                <dd className="mt-0.5 text-xs font-mono text-foreground break-all">{policy.redirect_url || "N/A"}</dd>
+                <dd className="mt-0.5 text-xs font-mono text-foreground break-all">{policy.redirect_url ?? "N/A"}</dd>
               </div>
             </dl>
           </CardContent>
         </Card>
       </div>
 
-      {/* Rules */}
       <Card className="border shadow-sm overflow-hidden">
         <CardHeader className="pb-2">
           <CardTitle className="text-sm font-semibold text-foreground">Policy Rules ({rules.length})</CardTitle>
         </CardHeader>
+
         <Table>
           <TableHeader>
             <TableRow className="bg-muted/50">
@@ -163,22 +235,27 @@ export default function PolicyDetailPage({ params }: { params: Promise<{ id: str
               <TableHead className="text-[11px]">Enabled</TableHead>
             </TableRow>
           </TableHeader>
+
           <TableBody>
             {rules.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={7} className="text-center py-8 text-sm text-muted-foreground">No rules defined</TableCell>
+                <TableCell colSpan={7} className="text-center py-8 text-sm text-muted-foreground">
+                  No rules defined
+                </TableCell>
               </TableRow>
-            ) : rules.map(rule => (
-              <TableRow key={rule.rule_id} className="text-xs">
-                <TableCell className="font-mono text-[11px]">{rule.rule_order}</TableCell>
-                <TableCell><Badge variant="outline" className="text-[11px]">{rule.rule_type}</Badge></TableCell>
-                <TableCell><Badge variant="secondary" className="text-[11px]">{rule.match_type}</Badge></TableCell>
-                <TableCell className="font-mono text-[11px] text-foreground max-w-[200px] truncate">{rule.pattern}</TableCell>
-                <TableCell className="text-[11px]">{rule.is_case_sensitive ? "Yes" : "No"}</TableCell>
-                <TableCell className="text-[11px]">{rule.is_negated ? "Yes" : "No"}</TableCell>
-                <TableCell><Switch checked={rule.is_enabled} className="scale-75" /></TableCell>
-              </TableRow>
-            ))}
+            ) : (
+              rules.map(rule => (
+                <TableRow key={rule.rule_id} className="text-xs">
+                  <TableCell className="font-mono text-[11px]">{rule.rule_order}</TableCell>
+                  <TableCell><Badge variant="outline" className="text-[11px]">{rule.rule_type}</Badge></TableCell>
+                  <TableCell><Badge variant="secondary" className="text-[11px]">{rule.match_type}</Badge></TableCell>
+                  <TableCell className="font-mono text-[11px] text-foreground max-w-[200px] truncate">{rule.pattern}</TableCell>
+                  <TableCell className="text-[11px]">{toBool(rule.is_case_sensitive) ? "Yes" : "No"}</TableCell>
+                  <TableCell className="text-[11px]">{toBool(rule.is_negated) ? "Yes" : "No"}</TableCell>
+                  <TableCell><Switch checked={toBool(rule.is_enabled)} className="scale-75" /></TableCell>
+                </TableRow>
+              ))
+            )}
           </TableBody>
         </Table>
       </Card>

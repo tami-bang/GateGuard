@@ -14,13 +14,44 @@ import { mockUsers } from "@/lib/mock-data"
 
 type Mode = "login" | "forgot" | "reset"
 
+function safeDecodeRepeated(v: string, maxRounds: number): string {
+  let cur = v
+  for (let i = 0; i < maxRounds; i++) {
+    try {
+      const dec = decodeURIComponent(cur)
+      if (dec === cur) break
+      cur = dec
+    } catch {
+      break
+    }
+  }
+  return cur
+}
+
+function sanitizeNext(nextRaw: string | null): { raw: string | null; decoded: string | null; path: string | null } {
+  if (!nextRaw) return { raw: null, decoded: null, path: null }
+
+  // next가 "%2Fpolicies%2F8" 혹은 "%252Fpolicies%252F8"(이중 인코딩)로 올 수 있어 반복 디코딩
+  const decoded = safeDecodeRepeated(nextRaw, 3).trim()
+
+  // 오픈 리다이렉트 방지: 같은 사이트 내 상대경로만 허용
+  if (!decoded.startsWith("/")) return { raw: nextRaw, decoded, path: null }
+  if (decoded.startsWith("//")) return { raw: nextRaw, decoded, path: null }
+  if (decoded.includes("\\")) return { raw: nextRaw, decoded, path: null }
+
+  return { raw: nextRaw, decoded, path: decoded }
+}
+
 export default function LoginClient() {
   const router = useRouter()
   const searchParams = useSearchParams()
 
-  // next 파라미터: "/..." 형태만 허용(오픈리다이렉트 방지)
-  const nextParam = searchParams.get("next")
-  const nextPath = nextParam && nextParam.startsWith("/") ? nextParam : null
+  const nextInfo = useMemo(() => {
+    const raw = searchParams.get("next")
+    return sanitizeNext(raw)
+  }, [searchParams])
+
+  const nextPath = nextInfo.path
 
   const { login, isAuthenticated, bootstrapped } = useAuth()
 
@@ -31,19 +62,39 @@ export default function LoginClient() {
   const [fieldErrors, setFieldErrors] = useState<{ email?: string; password?: string }>({})
   const [submitting, setSubmitting] = useState(false)
 
+  function gotoAfterLogin() {
+    const target = nextPath ?? "/dashboard"
+
+    // 1) SPA 라우팅 시도
+    router.replace(target)
+
+    // 2) 미들웨어/세션/프록시 환경에서 SPA replace가 먹통이거나 다시 튕기는 케이스 대비:
+    //    300ms 후에도 경로가 안 바뀌면 하드 네비게이션으로 강제 이동
+    if (typeof window !== "undefined") {
+      window.setTimeout(() => {
+        try {
+          if (window.location.pathname !== target) {
+            window.location.assign(target)
+          }
+        } catch {
+          // ignore
+        }
+      }, 300)
+    }
+  }
+
   /**
-   * 중요:
-   * - 이미 로그인 상태라면 "/"(로그인 페이지)에서만 redirect 수행
-   * - /logs 같은 보호 페이지에서는 redirect 로직이 개입하면 안 됨
+   * 이미 로그인 상태라면 "/"에서만 redirect 수행
    */
   useEffect(() => {
     if (!bootstrapped) return
     if (!isAuthenticated) return
+    if (typeof window === "undefined") return
 
-    if (typeof window !== "undefined" && window.location.pathname === "/") {
-      router.replace(nextPath ?? "/dashboard")
+    if (window.location.pathname === "/") {
+      gotoAfterLogin()
     }
-  }, [bootstrapped, isAuthenticated, nextPath, router])
+  }, [bootstrapped, isAuthenticated, nextPath]) // router는 내부에서만 사용
 
   function validateEmail(value: string) {
     const v = value.trim()
@@ -94,8 +145,12 @@ export default function LoginClient() {
     try {
       setSubmitting(true)
       const success = await login(email.trim(), password)
-      if (success) router.replace(nextPath ?? "/dashboard")
-      else setError("Invalid credentials. Try one of the demo accounts below.")
+
+      if (success) {
+        gotoAfterLogin()
+      } else {
+        setError("Invalid credentials. Try one of the demo accounts below.")
+      }
     } catch {
       setError("Login failed. Please try again.")
     } finally {
@@ -107,10 +162,11 @@ export default function LoginClient() {
     if (submitting) return
     setError("")
     setFieldErrors({})
+
     try {
       setSubmitting(true)
       await login(userEmail, "demo")
-      router.replace(nextPath ?? "/dashboard")
+      gotoAfterLogin()
     } catch {
       setError("Login failed. Please try again.")
     } finally {
@@ -139,6 +195,13 @@ export default function LoginClient() {
           </CardHeader>
 
           <CardContent className="px-6 pb-6">
+            {/* 디버그: 원인 확정용(원인 잡히면 지워도 됨) */}
+            <div className="mb-3 rounded-md border bg-muted/30 p-2 text-[11px] text-muted-foreground">
+              <div className="font-mono">next.raw: {nextInfo.raw ?? "null"}</div>
+              <div className="font-mono">next.decoded: {nextInfo.decoded ?? "null"}</div>
+              <div className="font-mono">next.path: {nextPath ?? "null"}</div>
+            </div>
+
             {mode === "login" && (
               <form onSubmit={handleLogin} className="flex flex-col gap-4">
                 <div className="flex flex-col gap-1.5">

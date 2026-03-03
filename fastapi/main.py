@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Optional, Any, List, Dict
 
 import pymysql
-from fastapi import FastAPI, Header, HTTPException, Query, Response
+from fastapi import FastAPI, Header, HTTPException, Query, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -123,6 +123,21 @@ def _update_dynamic(cur, table: str, key_col: str, key_val: Any, payload: dict) 
     return int(cur.rowcount)
 
 
+def _get_reviewer_id_from_header(request: Request) -> Optional[int]:
+    """
+    Admin UI(Next) -> FastAPI 호출 시 사용자 식별자 전달용
+    - 헤더: X-User-Id: <int>
+    """
+    raw = request.headers.get("x-user-id") or request.headers.get("X-User-Id")
+    if not raw:
+        return None
+    try:
+        v = int(str(raw).strip())
+        return v if v > 0 else None
+    except Exception:
+        return None
+
+
 # =========================
 # Access log helpers (existing)
 # =========================
@@ -225,6 +240,7 @@ class ResolveReviewRequest(BaseModel):
     create_policy: bool = False
     policy_override: Optional[CreatePolicyFromReviewRequest] = None
 
+
 def _create_policy_from_review_tx(
     cur,
     conn,
@@ -271,6 +287,10 @@ def _create_policy_from_review_tx(
     if not host:
         raise HTTPException(status_code=400, detail="cannot create policy: access_log.host is empty")
 
+    reviewer_id = int(review_event.get("reviewer_id") or 0)
+    if reviewer_id <= 0:
+        reviewer_id = 1  # 스키마 NOT NULL 안전장치 (운영자 헤더가 안 오면 1로)
+
     # ---- policy INSERT (policy 스키마 맞춤) ----
     base_policy_payload = {
         "policy_name": policy_name,
@@ -278,16 +298,15 @@ def _create_policy_from_review_tx(
         "action": action,
         "priority": 100,
         "is_enabled": 1,
-        "created_at": _now_str(),   # 있어도 되고 없어도 됨(기본값 존재)
+        "created_at": _now_str(),
         "updated_at": _now_str(),
-        "created_by": int(review_event.get("reviewer_id") or 1),  # created_by NOT NULL (default 1)
-        "updated_by": int(review_event.get("reviewer_id") or 1),
+        "created_by": reviewer_id,
+        "updated_by": reviewer_id,
     }
     policy_payload = _filter_payload_by_cols(base_policy_payload, policy_cols)
     policy_id = _insert_dynamic(cur, "policy", policy_payload)
 
     # ---- policy_rule INSERT (policy_rule 스키마 맞춤) ----
-    # 필수: policy_id, rule_type, match_type, pattern, is_case_sensitive, is_negated, rule_order
     rules = []
 
     # HOST rule: EXACT 매칭 권장
@@ -307,7 +326,7 @@ def _create_policy_from_review_tx(
         raise HTTPException(status_code=500, detail="policy_rule schema mismatch: cannot insert HOST rule")
     rules.append(host_rule)
 
-    # PATH rule: PREFIX 매칭 권장 (/login 같은)
+    # PATH rule: PREFIX 매칭 권장
     if path:
         path_rule = {
             "policy_id": policy_id,
@@ -321,7 +340,6 @@ def _create_policy_from_review_tx(
             "created_at": _now_str(),
         }
         path_rule = _filter_payload_by_cols(path_rule, rule_cols)
-        # path 룰이 insertable 하면 추가(스키마/제약 대응)
         if path_rule:
             rules.append(path_rule)
 
@@ -329,12 +347,10 @@ def _create_policy_from_review_tx(
         _insert_dynamic(cur, "policy_rule", r)
 
     # ---- policy_audit INSERT (policy_audit 스키마 맞춤) ----
-    changed_by = int(review_event.get("reviewer_id") or 1)  # 0 대신 1 권장(스키마 NOT NULL)
-
     audit_payload = {
         "policy_id": policy_id,
         "action": "CREATE",
-        "changed_by": changed_by,
+        "changed_by": reviewer_id,
         "changed_at": _now_str(),
         "source_review_id": review_id,
         "change_note": f"policy created from review_event(review_id={review_id}, log_id={log_id})",
@@ -363,7 +379,7 @@ def _create_policy_from_review_tx(
     if audit_payload:
         _insert_dynamic(cur, "policy_audit", audit_payload)
 
-    # ---- review_event 업데이트: generated_policy_id + CLOSED + reviewed_at ----
+    # ---- review_event 업데이트: generated_policy_id + CLOSED + reviewed_at (+ reviewer_id 보정 가능) ----
     upd = {}
     if "generated_policy_id" in review_cols:
         upd["generated_policy_id"] = policy_id
@@ -371,16 +387,22 @@ def _create_policy_from_review_tx(
         upd["status"] = REVIEW_STATUS_CLOSED
     if "reviewed_at" in review_cols:
         upd["reviewed_at"] = _now_str()
+    if "reviewer_id" in review_cols and review_event.get("reviewer_id") is not None:
+        try:
+            upd["reviewer_id"] = int(review_event.get("reviewer_id"))
+        except Exception:
+            pass
+    if "updated_at" in review_cols:
+        upd["updated_at"] = _now_str()
 
     if upd:
         _update_dynamic(cur, "review_event", "review_id", review_id, upd)
 
-    return policy_id 
+    return policy_id
+
 
 # -------------------------
 # Review Event API (review_event)
-# -------------------------
-# URL 호환을 위해 /v1/incidents 도 같이 열어둔다.
 # -------------------------
 
 @app.get("/v1/review-events")
@@ -460,11 +482,12 @@ def get_review_event_by_log(log_id: int):
         ev = _get_review_event_by_log(conn, int(log_id))
         return {"review_event": ev}
 
+
 @app.post("/v1/review-events")
 @app.post("/review-events")
 @app.post("/v1/incidents")  # backward alias
 @app.post("/incidents")     # backward alias
-def create_review_event(req: ReviewEventCreateRequest):
+def create_review_event(req: ReviewEventCreateRequest, request: Request):
     with db_conn() as conn:
         # 1) access_log 존재 확인 (설계서 기준: review_event.log_id FK 성격)
         log = _get_access_log(conn, int(req.log_id))
@@ -478,8 +501,10 @@ def create_review_event(req: ReviewEventCreateRequest):
                 detail="invalid proposed_action (ALLOW/BLOCK/CREATE_POLICY/UPDATE_POLICY/NO_ACTION)",
             )
 
+        # reviewer_id 자동 주입: req 우선, 없으면 헤더(X-User-Id)
+        reviewer_id = req.reviewer_id if req.reviewer_id is not None else _get_reviewer_id_from_header(request)
+
         # 2) 운영 정책(추천): log_id당 OPEN/IN_PROGRESS는 1개만 허용
-        #    이미 있으면 새로 만들지 않고 기존 티켓을 반환(옵션 A)
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -494,7 +519,6 @@ def create_review_event(req: ReviewEventCreateRequest):
             existing = cur.fetchone()
 
         if existing:
-            # 기존 OPEN/IN_PROGRESS 티켓 반환
             return {"review_event": existing, "log": log}
 
         # 3) 없으면 새로 생성
@@ -502,7 +526,7 @@ def create_review_event(req: ReviewEventCreateRequest):
             "log_id": int(req.log_id),
             "status": REVIEW_STATUS_OPEN,
             "proposed_action": req.proposed_action,
-            "reviewer_id": req.reviewer_id,
+            "reviewer_id": reviewer_id,
             "note": (req.note[:255] if req.note else None),
             "created_at": _now_str(),
             "reviewed_at": None,
@@ -516,11 +540,12 @@ def create_review_event(req: ReviewEventCreateRequest):
         ev = _get_review_event_by_id(conn, new_id)
         return {"review_event": ev, "log": log}
 
+
 @app.patch("/v1/review-events/{review_id}")
 @app.patch("/review-events/{review_id}")
 @app.patch("/v1/incidents/{review_id}")  # backward alias
 @app.patch("/incidents/{review_id}")     # backward alias
-def patch_review_event(review_id: int, req: ReviewEventPatchRequest):
+def patch_review_event(review_id: int, req: ReviewEventPatchRequest, request: Request):
     with db_conn() as conn:
         cols = _get_table_cols(conn, "review_event")
         id_col = _review_id_col(conn)
@@ -528,12 +553,17 @@ def patch_review_event(review_id: int, req: ReviewEventPatchRequest):
         _ = _get_review_event_by_id(conn, review_id)
 
         payload = {}
+        header_reviewer_id = _get_reviewer_id_from_header(request)
+
+        status_changed = False
+        action_changed = False
 
         if req.status is not None:
             if req.status not in REVIEW_ALLOWED_STATUS:
                 raise HTTPException(status_code=400, detail="invalid status (OPEN/IN_PROGRESS/CLOSED)")
             if "status" in cols:
                 payload["status"] = req.status
+                status_changed = True
             if req.status == REVIEW_STATUS_CLOSED and "reviewed_at" in cols:
                 payload["reviewed_at"] = _now_str()
 
@@ -545,12 +575,17 @@ def patch_review_event(review_id: int, req: ReviewEventPatchRequest):
                 )
             if "proposed_action" in cols:
                 payload["proposed_action"] = req.proposed_action
+                action_changed = True
 
         if req.note is not None and "note" in cols:
             payload["note"] = req.note[:255]
 
-        if req.reviewer_id is not None and "reviewer_id" in cols:
-            payload["reviewer_id"] = int(req.reviewer_id)
+        # reviewer_id: req 우선, (status/proposed_action 변경 시) 헤더 fallback
+        if "reviewer_id" in cols:
+            if req.reviewer_id is not None:
+                payload["reviewer_id"] = int(req.reviewer_id)
+            elif (status_changed or action_changed) and header_reviewer_id is not None:
+                payload["reviewer_id"] = int(header_reviewer_id)
 
         if "updated_at" in cols:
             payload["updated_at"] = _now_str()
@@ -566,7 +601,7 @@ def patch_review_event(review_id: int, req: ReviewEventPatchRequest):
 @app.post("/review-events/{review_id}/actions/create-policy")
 @app.post("/v1/incidents/{review_id}/actions/create-policy")  # backward alias
 @app.post("/incidents/{review_id}/actions/create-policy")     # backward alias
-def create_policy_from_review_event(review_id: int, body: Optional[CreatePolicyFromReviewRequest] = None):
+def create_policy_from_review_event(review_id: int, body: Optional[CreatePolicyFromReviewRequest] = None, request: Request = None):
     """
     review_event 기반 policy + policy_rule 생성, policy_audit.source_review_id로 연결,
     review_event.generated_policy_id 갱신 + CLOSED 처리.
@@ -580,6 +615,15 @@ def create_policy_from_review_event(review_id: int, body: Optional[CreatePolicyF
 
             if ev.get("proposed_action") and ev.get("proposed_action") != REVIEW_ACTION_CREATE_POLICY:
                 raise HTTPException(status_code=400, detail="proposed_action is not CREATE_POLICY")
+
+            # reviewer_id 자동 보정: ev에 없으면 헤더(X-User-Id)로 review_event에 먼저 반영
+            cols = _get_table_cols(conn, "review_event")
+            header_reviewer_id = _get_reviewer_id_from_header(request) if request is not None else None
+            if "reviewer_id" in cols:
+                ev_reviewer = ev.get("reviewer_id")
+                if (ev_reviewer is None or int(ev_reviewer or 0) <= 0) and header_reviewer_id is not None:
+                    _update_dynamic(cur, "review_event", "review_id", int(review_id), {"reviewer_id": int(header_reviewer_id), "updated_at": _now_str()} if "updated_at" in cols else {"reviewer_id": int(header_reviewer_id)})
+                    ev["reviewer_id"] = int(header_reviewer_id)
 
             policy_id = _create_policy_from_review_tx(cur, conn, ev, log, override=body)
             conn.commit()
@@ -605,7 +649,7 @@ def create_policy_from_review_event(review_id: int, body: Optional[CreatePolicyF
 @app.post("/review-events/{review_id}/resolve")
 @app.post("/v1/incidents/{review_id}/resolve")  # backward alias
 @app.post("/incidents/{review_id}/resolve")     # backward alias
-def resolve_review_event(review_id: int, req: ResolveReviewRequest):
+def resolve_review_event(review_id: int, req: ResolveReviewRequest, request: Request):
     """
     설계서: CLOSED 시 reviewed_at 기록.
     옵션: create_policy=True면 resolve 과정에서 policy 생성까지 수행하고 연결.
@@ -617,6 +661,20 @@ def resolve_review_event(review_id: int, req: ResolveReviewRequest):
             ev = _get_review_event_by_id(conn, review_id)
             log = _get_access_log(conn, int(ev["log_id"]))
 
+            cols = _get_table_cols(conn, "review_event")
+            header_reviewer_id = _get_reviewer_id_from_header(request)
+
+            # reviewer_id 결정: req 우선, 없으면 헤더
+            effective_reviewer_id: Optional[int] = None
+            if req.reviewer_id is not None:
+                effective_reviewer_id = int(req.reviewer_id)
+            elif header_reviewer_id is not None:
+                effective_reviewer_id = int(header_reviewer_id)
+
+            # 정책 생성 시에도 reviewer_id가 tx로 전달되게 ev에 주입
+            if effective_reviewer_id is not None:
+                ev["reviewer_id"] = effective_reviewer_id
+
             created_policy_id = None
             if req.create_policy:
                 created_policy_id = _create_policy_from_review_tx(
@@ -627,15 +685,16 @@ def resolve_review_event(review_id: int, req: ResolveReviewRequest):
                     override=req.policy_override,
                 )
 
-            cols = _get_table_cols(conn, "review_event")
             upd = {}
 
             if "status" in cols:
                 upd["status"] = REVIEW_STATUS_CLOSED
             if "reviewed_at" in cols:
                 upd["reviewed_at"] = _now_str()
-            if req.reviewer_id is not None and "reviewer_id" in cols:
-                upd["reviewer_id"] = int(req.reviewer_id)
+
+            if "reviewer_id" in cols and effective_reviewer_id is not None:
+                upd["reviewer_id"] = effective_reviewer_id
+
             if req.note is not None and "note" in cols:
                 upd["note"] = req.note[:255]
             if "updated_at" in cols:
@@ -656,9 +715,159 @@ def resolve_review_event(review_id: int, req: ResolveReviewRequest):
         raise HTTPException(status_code=500, detail=f"resolve failed: {str(e)}")
     finally:
         conn.autocommit(True)
-        conn.autocommit(True)
         conn.close()
 
+# =========================
+# Policy API (policy, policy_rule)
+# =========================
+
+def _get_policy_by_id(conn, policy_id: int) -> dict:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM policy WHERE policy_id=%s", (int(policy_id),))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="policy not found")
+        return row
+
+
+def _list_policy_rules(conn, policy_id: int) -> List[dict]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT *
+            FROM policy_rule
+            WHERE policy_id=%s
+            ORDER BY rule_order ASC, rule_id ASC
+            """,
+            (int(policy_id),),
+        )
+        return cur.fetchall() or []
+
+
+@app.get("/v1/policies")
+@app.get("/policies")
+def list_policies(
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    q: Optional[str] = None,
+    policy_type: Optional[str] = None,
+    action: Optional[str] = None,
+    is_enabled: Optional[int] = None,
+    sort: str = Query("created_at"),
+    dir: str = Query("desc"),
+):
+    with db_conn() as conn:
+        cols = _get_table_cols(conn, "policy")
+
+        where = []
+        params: List[Any] = []
+
+        if q:
+            # name 기반 검색
+            if "policy_name" in cols:
+                where.append("policy_name LIKE %s")
+                params.append(f"%{q}%")
+
+        if policy_type and "policy_type" in cols:
+            where.append("policy_type=%s")
+            params.append(policy_type)
+
+        if action and "action" in cols:
+            where.append("action=%s")
+            params.append(action)
+
+        if is_enabled is not None and "is_enabled" in cols:
+            where.append("is_enabled=%s")
+            params.append(int(is_enabled))
+
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
+        allowed_sort = [c for c in ["created_at", "updated_at", "priority", "policy_id", "policy_name"] if c in cols]
+        if sort not in allowed_sort:
+            sort = allowed_sort[0] if allowed_sort else "policy_id"
+
+        if (dir or "").lower() not in ("asc", "desc"):
+            dir = "desc"
+
+        order_sql = f"ORDER BY {sort} {dir.upper()}"
+
+        count_sql = f"SELECT COUNT(*) AS cnt FROM policy {where_sql}"
+        data_sql = f"SELECT * FROM policy {where_sql} {order_sql} LIMIT %s OFFSET %s"
+
+        with conn.cursor() as cur:
+            cur.execute(count_sql, params)
+            total = int(cur.fetchone()["cnt"])
+
+            cur.execute(data_sql, params + [limit, offset])
+            rows = cur.fetchall() or []
+
+    return {"items": rows, "total": total, "limit": limit, "offset": offset, "sort": sort, "dir": dir}
+
+
+@app.get("/v1/policies/{policy_id}")
+@app.get("/policies/{policy_id}")
+def get_policy(policy_id: int, include_rules: bool = Query(True)):
+    with db_conn() as conn:
+        pol = _get_policy_by_id(conn, int(policy_id))
+        if not include_rules:
+            return {"policy": pol}
+
+        rules = _list_policy_rules(conn, int(policy_id))
+        return {"policy": pol, "rules": rules}
+
+
+@app.get("/v1/policies/{policy_id}/rules")
+@app.get("/policies/{policy_id}/rules")
+def list_policy_rules(policy_id: int):
+    with db_conn() as conn:
+        _ = _get_policy_by_id(conn, int(policy_id))  # 존재 확인
+        rows = _list_policy_rules(conn, int(policy_id))
+        return {"items": rows}
+
+
+class PolicyPatchRequest(BaseModel):
+    policy_name: Optional[str] = None
+    policy_type: Optional[str] = None
+    action: Optional[str] = None
+    priority: Optional[int] = None
+    is_enabled: Optional[int] = None
+
+    risk_level: Optional[str] = None
+    category: Optional[str] = None
+    block_status_code: Optional[int] = None
+    redirect_url: Optional[str] = None
+    description: Optional[str] = None
+
+
+@app.patch("/v1/policies/{policy_id}")
+@app.patch("/policies/{policy_id}")
+def patch_policy(policy_id: int, req: PolicyPatchRequest, request: Request):
+    with db_conn() as conn:
+        cols = _get_table_cols(conn, "policy")
+        _ = _get_policy_by_id(conn, int(policy_id))
+
+        payload: Dict[str, Any] = {}
+
+        # 허용 필드만 반영
+        for k, v in req.model_dump(exclude_unset=True).items():
+            if k in cols:
+                payload[k] = v
+
+        # updated_at/updated_by 자동 반영
+        if "updated_at" in cols:
+            payload["updated_at"] = _now_str()
+
+        reviewer_id = _get_reviewer_id_from_header(request)
+        if reviewer_id is not None and "updated_by" in cols:
+            payload["updated_by"] = int(reviewer_id)
+
+        if not payload:
+            return {"ok": True, "policy": _get_policy_by_id(conn, int(policy_id))}
+
+        with conn.cursor() as cur:
+            _update_dynamic(cur, "policy", "policy_id", int(policy_id), payload)
+
+        return {"ok": True, "policy": _get_policy_by_id(conn, int(policy_id))}
 
 # =========================
 # AI Scoring (existing)

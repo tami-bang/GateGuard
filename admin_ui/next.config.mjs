@@ -1,8 +1,10 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   allowedDevOrigins: [
-    "http://192.168.1.24:8080",
-    "http://localhost:8080",
+    "192.168.1.24",
+    "192.168.1.128",
+    "localhost",
+    "127.0.0.1",
   ],
 }
 
