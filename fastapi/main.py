@@ -273,11 +273,22 @@ def _create_policy_from_review_tx(
             return None
         return str(v)
 
-    host = pick_log_or_override("host", override.host if override else None)
-    path = pick_log_or_override("path", override.path if override else None)
+    host_raw = pick_log_or_override("host", override.host if override else None)
+    path_raw = pick_log_or_override("path", override.path if override else None)
 
     # method는 access_log에 있을 수 있지만, policy_rule enum에 METHOD가 없어서 정책 rule로는 미사용
     method = pick_log_or_override("method", override.method if override else None)
+
+    # ---- P0: noisy/dev/admin-ui 요청으로 정책 자동 생성 금지 ----
+    if _is_noise_request_for_policy(host_raw, path_raw):
+        raise HTTPException(
+            status_code=400,
+            detail="cannot create policy: noisy/dev/admin-ui request (nextjs/internal)",
+        )
+
+    # ---- normalize: host에서 포트 제거, path에서 query 제거 ----
+    host = _strip_port_from_host(host_raw)
+    path = _normalize_path_for_policy(path_raw)
 
     policy_name = (override.policy_name if override and override.policy_name else None) or f"review-{review_id}-log-{log_id}"
     policy_type = (override.policy_type if override and override.policy_type else None) or "BLOCKLIST"
@@ -718,6 +729,126 @@ def resolve_review_event(review_id: int, req: ResolveReviewRequest, request: Req
         conn.close()
 
 # =========================
+# Policy creation normalization / noise filtering (P0)
+# =========================
+
+def _strip_port_from_host(host: Optional[str]) -> Optional[str]:
+    """
+    host가 'ip:port' 형태면 port 제거.
+    IPv4 기준(프로젝트 원칙).
+    """
+    if not host:
+        return host
+    h = str(host).strip()
+    if ":" in h:
+        parts = h.split(":")
+        if len(parts) == 2 and parts[1].isdigit():
+            return parts[0]
+    return h
+
+
+def _normalize_path_for_policy(path: Optional[str]) -> Optional[str]:
+    """
+    정책 rule 생성용 path 정규화:
+    - query 제거 (? 이후 제거)
+    - 길이 제한(폭주 방지)
+    """
+    if not path:
+        return None
+    s = str(path).strip()
+
+    qpos = s.find("?")
+    if qpos >= 0:
+        s = s[:qpos]
+
+    if len(s) > 256:
+        s = s[:256]
+
+    return s if s else None
+
+
+def _is_noise_request_for_policy(host: Optional[str], path: Optional[str]) -> bool:
+    """
+    제품화 P0:
+    - Next.js dev / internal 잡음 요청으로 정책 생성 금지
+    - Admin UI 자체 트래픽으로 정책 생성 금지(현재 환경 기준)
+    """
+    h = (host or "").strip().lower()
+    p = (path or "").strip().lower()
+
+    # Next.js 내부/개발 잡음
+    if p.startswith("/__nextjs_source-map"):
+        return True
+    if p.startswith("/_next/"):
+        return True
+    if p in ("/favicon.ico", "/robots.txt"):
+        return True
+    if "_rsc=" in p:
+        return True
+
+    # Admin UI 자체(현재 환경) - 정책 자동생성 제외
+    # host에 포트가 붙는 경우가 있어서 둘 다 방어
+    if h in ("192.168.1.24:8080", "192.168.1.24"):
+        return True
+
+    return False
+
+def _snapshot_policy(conn, policy_id: int) -> dict:
+    """
+    policy_audit before/after_snapshot용 스냅샷
+    - policy row
+    - policy_rule rows
+    """
+    pol = _get_policy_by_id(conn, int(policy_id))
+    rules = _list_policy_rules(conn, int(policy_id))
+    return {"policy": pol, "rules": rules}
+
+# =========================
+# Policy audit helpers for rule changes
+# =========================
+
+def _get_policy_and_rules(conn, policy_id: int) -> dict:
+    pol = _get_policy_by_id(conn, int(policy_id))
+    rules = _list_policy_rules(conn, int(policy_id))
+    return {"policy": pol, "rules": rules}
+
+def _insert_policy_audit_update(
+    cur,
+    conn,
+    policy_id: int,
+    changed_by: int,
+    change_note: str,
+    before_obj: dict,
+    after_obj: dict,
+    source_review_id: Optional[int] = None,
+) -> None:
+    audit_cols = _get_table_cols(conn, "policy_audit")
+
+    payload = {
+        "policy_id": int(policy_id),
+        "action": "UPDATE",
+        "changed_by": int(changed_by),
+        "changed_at": _now_str(),
+        "source_review_id": int(source_review_id) if source_review_id is not None else None,
+        "change_note": (change_note[:255] if change_note else None),
+        "before_snapshot": json.dumps(before_obj, ensure_ascii=False, default=str),
+        "after_snapshot": json.dumps(after_obj, ensure_ascii=False, default=str),
+    }
+    payload = _filter_payload_by_cols(payload, audit_cols)
+    if payload:
+        _insert_dynamic(cur, "policy_audit", payload)
+
+def _touch_policy_updated(cur, conn, policy_id: int, user_id: int) -> None:
+    cols = _get_table_cols(conn, "policy")
+    upd = {}
+    if "updated_at" in cols:
+        upd["updated_at"] = _now_str()
+    if "updated_by" in cols and user_id and user_id > 0:
+        upd["updated_by"] = int(user_id)
+    if upd:
+        _update_dynamic(cur, "policy", "policy_id", int(policy_id), upd)
+
+# =========================
 # Policy API (policy, policy_rule)
 # =========================
 
@@ -838,13 +969,38 @@ class PolicyPatchRequest(BaseModel):
     redirect_url: Optional[str] = None
     description: Optional[str] = None
 
+class PolicyRuleCreateRequest(BaseModel):
+    rule_type: str  # HOST/PATH/URL
+    match_type: str # EXACT/PREFIX/CONTAINS/REGEX
+    pattern: str
+
+    is_case_sensitive: int = 0
+    is_negated: int = 0
+    rule_order: Optional[int] = None
+    is_enabled: int = 1
+
+class PolicyRulePatchRequest(BaseModel):
+    rule_type: Optional[str] = None
+    match_type: Optional[str] = None
+    pattern: Optional[str] = None
+
+    is_case_sensitive: Optional[int] = None
+    is_negated: Optional[int] = None
+    rule_order: Optional[int] = None
+    is_enabled: Optional[int] = None
 
 @app.patch("/v1/policies/{policy_id}")
 @app.patch("/policies/{policy_id}")
 def patch_policy(policy_id: int, req: PolicyPatchRequest, request: Request):
-    with db_conn() as conn:
+    conn = db_conn()
+    try:
+        conn.autocommit(False)
+
         cols = _get_table_cols(conn, "policy")
-        _ = _get_policy_by_id(conn, int(policy_id))
+        audit_cols = _get_table_cols(conn, "policy_audit")
+
+        # 존재 확인 + before snapshot
+        before_snapshot = _snapshot_policy(conn, int(policy_id))
 
         payload: Dict[str, Any] = {}
 
@@ -858,16 +1014,222 @@ def patch_policy(policy_id: int, req: PolicyPatchRequest, request: Request):
             payload["updated_at"] = _now_str()
 
         reviewer_id = _get_reviewer_id_from_header(request)
-        if reviewer_id is not None and "updated_by" in cols:
-            payload["updated_by"] = int(reviewer_id)
+        changed_by = int(reviewer_id) if reviewer_id is not None and int(reviewer_id) > 0 else 1
 
+        if "updated_by" in cols:
+            payload["updated_by"] = changed_by
+
+        # 변경사항이 없으면 audit도 남기지 않음(정상)
         if not payload:
+            conn.rollback()
             return {"ok": True, "policy": _get_policy_by_id(conn, int(policy_id))}
 
         with conn.cursor() as cur:
             _update_dynamic(cur, "policy", "policy_id", int(policy_id), payload)
 
+            # after snapshot
+            after_snapshot = _snapshot_policy(conn, int(policy_id))
+
+            # policy_audit INSERT (UPDATE)
+            audit_payload = {
+                "policy_id": int(policy_id),
+                "action": "UPDATE",
+                "changed_by": changed_by,
+                "changed_at": _now_str(),
+                "change_note": f"policy patched via API: fields={list(payload.keys())}",
+                "before_snapshot": json.dumps(before_snapshot, ensure_ascii=False, default=str),
+                "after_snapshot": json.dumps(after_snapshot, ensure_ascii=False, default=str),
+            }
+            audit_payload = _filter_payload_by_cols(audit_payload, audit_cols)
+
+            if audit_payload:
+                _insert_dynamic(cur, "policy_audit", audit_payload)
+
+        conn.commit()
         return {"ok": True, "policy": _get_policy_by_id(conn, int(policy_id))}
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"patch policy failed: {str(e)}")
+    finally:
+        try:
+            conn.autocommit(True)
+        except Exception:
+            pass
+        conn.close()
+
+@app.post("/v1/policies/{policy_id}/rules")
+@app.post("/policies/{policy_id}/rules")
+def create_policy_rule(policy_id: int, req: PolicyRuleCreateRequest, request: Request):
+    user_id = _get_reviewer_id_from_header(request) or 1
+
+    conn = db_conn()
+    try:
+        conn.autocommit(False)
+        with conn.cursor() as cur:
+            _ = _get_policy_by_id(conn, int(policy_id))  # 존재 확인
+            rule_cols = _get_table_cols(conn, "policy_rule")
+
+            before_obj = _get_policy_and_rules(conn, int(policy_id))
+
+            # rule_order 자동 부여
+            rule_order = req.rule_order
+            if rule_order is None:
+                cur.execute(
+                    "SELECT COALESCE(MAX(rule_order), 0) AS mx FROM policy_rule WHERE policy_id=%s",
+                    (int(policy_id),),
+                )
+                mx = int(cur.fetchone()["mx"] or 0)
+                rule_order = mx + 1
+
+            payload = {
+                "policy_id": int(policy_id),
+                "rule_type": req.rule_type,
+                "match_type": req.match_type,
+                "pattern": req.pattern,
+                "is_case_sensitive": int(req.is_case_sensitive or 0),
+                "is_negated": int(req.is_negated or 0),
+                "rule_order": int(rule_order),
+                "is_enabled": int(req.is_enabled),
+                "created_at": _now_str(),
+            }
+            payload = _filter_payload_by_cols(payload, rule_cols)
+            rule_id = _insert_dynamic(cur, "policy_rule", payload)
+
+            _touch_policy_updated(cur, conn, int(policy_id), int(user_id))
+
+            after_obj = _get_policy_and_rules(conn, int(policy_id))
+            _insert_policy_audit_update(
+                cur,
+                conn,
+                policy_id=int(policy_id),
+                changed_by=int(user_id),
+                change_note=f"policy_rule CREATE rule_id={rule_id}",
+                before_obj=before_obj,
+                after_obj=after_obj,
+            )
+
+            conn.commit()
+
+        return {"ok": True, "rule_id": rule_id, "policy_id": int(policy_id)}
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"create rule failed: {str(e)}")
+    finally:
+        conn.autocommit(True)
+        conn.close()
+
+
+@app.patch("/v1/policy-rules/{rule_id}")
+@app.patch("/policy-rules/{rule_id}")
+def patch_policy_rule(rule_id: int, req: PolicyRulePatchRequest, request: Request):
+    user_id = _get_reviewer_id_from_header(request) or 1
+
+    conn = db_conn()
+    try:
+        conn.autocommit(False)
+        with conn.cursor() as cur:
+            rule_cols = _get_table_cols(conn, "policy_rule")
+
+            cur.execute("SELECT * FROM policy_rule WHERE rule_id=%s", (int(rule_id),))
+            old = cur.fetchone()
+            if not old:
+                raise HTTPException(status_code=404, detail="policy_rule not found")
+
+            policy_id = int(old["policy_id"])
+            before_obj = _get_policy_and_rules(conn, policy_id)
+
+            payload: Dict[str, Any] = {}
+            for k, v in req.model_dump(exclude_unset=True).items():
+                if k in rule_cols:
+                    payload[k] = v
+
+            if not payload:
+                conn.rollback()
+                return {"ok": True, "rule": old}
+
+            _update_dynamic(cur, "policy_rule", "rule_id", int(rule_id), payload)
+
+            _touch_policy_updated(cur, conn, int(policy_id), int(user_id))
+
+            after_obj = _get_policy_and_rules(conn, policy_id)
+            _insert_policy_audit_update(
+                cur,
+                conn,
+                policy_id=policy_id,
+                changed_by=int(user_id),
+                change_note=f"policy_rule UPDATE rule_id={rule_id}",
+                before_obj=before_obj,
+                after_obj=after_obj,
+            )
+
+            conn.commit()
+
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM policy_rule WHERE rule_id=%s", (int(rule_id),))
+            now = cur.fetchone()
+
+        return {"ok": True, "rule": now}
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"patch rule failed: {str(e)}")
+    finally:
+        conn.autocommit(True)
+        conn.close()
+
+
+@app.delete("/v1/policy-rules/{rule_id}")
+@app.delete("/policy-rules/{rule_id}")
+def delete_policy_rule(rule_id: int, request: Request):
+    user_id = _get_reviewer_id_from_header(request) or 1
+
+    conn = db_conn()
+    try:
+        conn.autocommit(False)
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM policy_rule WHERE rule_id=%s", (int(rule_id),))
+            old = cur.fetchone()
+            if not old:
+                raise HTTPException(status_code=404, detail="policy_rule not found")
+
+            policy_id = int(old["policy_id"])
+            before_obj = _get_policy_and_rules(conn, policy_id)
+
+            cur.execute("DELETE FROM policy_rule WHERE rule_id=%s", (int(rule_id),))
+
+            _touch_policy_updated(cur, conn, int(policy_id), int(user_id))
+
+            after_obj = _get_policy_and_rules(conn, policy_id)
+            _insert_policy_audit_update(
+                cur,
+                conn,
+                policy_id=policy_id,
+                changed_by=int(user_id),
+                change_note=f"policy_rule DELETE rule_id={rule_id}",
+                before_obj=before_obj,
+                after_obj=after_obj,
+            )
+
+            conn.commit()
+
+        return {"ok": True, "deleted_rule_id": int(rule_id), "policy_id": int(policy_id)}
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"delete rule failed: {str(e)}")
+    finally:
+        conn.autocommit(True)
+        conn.close()
 
 # =========================
 # AI Scoring (existing)
