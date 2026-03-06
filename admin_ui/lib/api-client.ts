@@ -355,6 +355,30 @@ export async function apiCreatePolicyFromIncident(
   })
 }
 
+export type ListPoliciesResponse = {
+  items: Policy[]
+  total: number
+  limit: number
+  offset: number
+  sort: string
+  dir: string
+}
+
+export async function apiListPolicies(params?: {
+  limit?: number
+  offset?: number
+  sort?: string
+  dir?: string
+}): Promise<ListPoliciesResponse> {
+  const qs = buildQuery({
+    limit: params?.limit,
+    offset: params?.offset,
+    sort: params?.sort,
+    dir: params?.dir,
+  })
+  return await httpJson<ListPoliciesResponse>(`/v1/policies${qs}`)
+}
+
 /**
  * Policy APIs
  * - 아래 2개 엔드포인트는 FastAPI에 있어야 동작함:
@@ -373,6 +397,61 @@ export async function apiListPolicyRules(policyId: number): Promise<ListPolicyRu
 export async function apiPatchPolicy(policyId: number, req: PatchPolicyRequest): Promise<PatchPolicyResponse> {
   return await httpJson<PatchPolicyResponse>(`/v1/policies/${policyId}`, {
     method: "PATCH",
+    body: JSON.stringify(req),
+  })
+}
+
+/**
+ * Policy CREATE APIs
+ * - FastAPI에 아래 엔드포인트가 있어야 동작:
+ *   POST /v1/policies
+ *   POST /v1/policies/{policy_id}/rules
+ */
+export type CreatePolicyRequest = {
+  policy_name: string
+  policy_type: PolicyType
+  action: PolicyAction
+  priority: number
+  is_enabled: 0 | 1
+  risk_level?: RiskLevel | null
+  category?: string | null
+  block_status_code?: number | null
+  redirect_url?: string | null
+  description?: string | null
+}
+
+export type CreatePolicyResponse = {
+  policy_id?: number
+  policy?: Policy
+  [k: string]: any
+}
+
+export type CreatePolicyRuleRequest = {
+  rule_type: string
+  match_type: string
+  pattern: string
+  is_case_sensitive: 0 | 1
+  is_negated: 0 | 1
+  is_enabled: 0 | 1
+  rule_order: number
+}
+
+export type CreatePolicyRuleResponse = {
+  rule_id?: number
+  rule?: PolicyRule
+  [k: string]: any
+}
+
+export async function apiCreatePolicy(req: CreatePolicyRequest): Promise<CreatePolicyResponse> {
+  return await httpJson<CreatePolicyResponse>(`/v1/policies`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  })
+}
+
+export async function apiCreatePolicyRule(policyId: number, req: CreatePolicyRuleRequest): Promise<CreatePolicyRuleResponse> {
+  return await httpJson<CreatePolicyRuleResponse>(`/v1/policies/${policyId}/rules`, {
+    method: "POST",
     body: JSON.stringify(req),
   })
 }

@@ -1,6 +1,7 @@
 "use client"
 
 import { use, useEffect, useMemo, useState } from "react"
+import { useRouter } from "next/navigation"
 import Link from "next/link"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -63,6 +64,7 @@ function normalizeRule(r: PolicyRule): RuleForm {
 export default function PolicyEditPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params)
   const policyId = useMemo(() => Number(id), [id])
+  const router = useRouter()
 
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -161,8 +163,10 @@ export default function PolicyEditPage({ params }: { params: Promise<{ id: strin
 
   async function saveChanges() {
     if (!existing) return
+
     setSaving(true)
     setError(null)
+
     try {
       await apiPatchPolicy(policyId, {
         policy_name: policy.policy_name,
@@ -177,18 +181,15 @@ export default function PolicyEditPage({ params }: { params: Promise<{ id: strin
         description: policy.description,
       })
 
-      // rules 저장은 현재 FastAPI에 업데이트 API가 없음.
-      // (GET rules만 있고, PUT/PATCH rules 엔드포인트 없음)
-      // 그래서 현재는 "정책 메타만 저장"이 정상 동작 범위.
-
-      const polResp = await apiGetPolicy(policyId)
-      setExisting(polResp?.policy ?? existing)
+	  alert("수정이 완료되었습니다.")
+      router.push("/policies")
+      router.refresh()
     } catch (e: any) {
       setError(e?.message ? String(e.message) : "Save failed")
     } finally {
       setSaving(false)
     }
-  }
+  }	
 
   if (loading) {
     return (
