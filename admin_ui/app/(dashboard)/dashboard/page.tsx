@@ -1,11 +1,13 @@
 "use client"
 
+import { useEffect, useMemo, useState } from "react"
+import Link from "next/link"
+
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { StatusChip } from "@/components/status-chip"
-import Link from "next/link"
 import {
   Globe,
   ShieldOff,
@@ -16,41 +18,281 @@ import {
   ExternalLink,
 } from "lucide-react"
 import {
-  AreaChart, Area, BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  AreaChart,
+  Area,
+  BarChart,
+  Bar,
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
 } from "recharts"
-import {
-  dashboardStats,
-  requestsOverTime,
-  blockVsAllowOverTime,
-  topHosts,
-  topPaths,
-  aiScoreDistribution,
-  aiLatencyOverTime,
-  mockAccessLogs,
-} from "@/lib/mock-data"
 
-const kpis = [
-  { label: "Total Requests", value: dashboardStats.totalRequests.toLocaleString(), icon: Globe, color: "#2563EB" },
-  { label: "Blocked Requests", value: dashboardStats.blockedRequests.toLocaleString(), icon: ShieldOff, color: "#dc2626" },
-  { label: "Block Rate", value: `${dashboardStats.blockRate}%`, icon: Percent, color: "#d97706" },
-  { label: "AI-Enforced Blocks", value: dashboardStats.aiEnforcedBlocks.toLocaleString(), icon: Brain, color: "#7c3aed" },
-  { label: "Policy-Enforced Blocks", value: dashboardStats.policyEnforcedBlocks.toLocaleString(), icon: FileText, color: "#2563EB" },
-  { label: "Open Incidents", value: dashboardStats.openIncidents.toString(), icon: AlertTriangle, color: "#d97706" },
-]
+type DashboardSummary = {
+  total_requests: number
+  blocked_requests: number
+  block_rate: number
+  ai_enforced_blocks: number
+  policy_enforced_blocks: number
+  open_incidents: number
+}
+
+type HourRequests = {
+  hour: string
+  requests: number
+}
+
+type HourDecisionSeries = {
+  hour: string
+  allow: number
+  block: number
+  review: number
+}
+
+type CountByHost = {
+  host: string
+  count: number
+}
+
+type CountByPath = {
+  path: string
+  count: number
+}
+
+type ScoreBucket = {
+  range: string
+  count: number
+}
+
+type LatencySeries = {
+  hour: string
+  avg_latency: number
+  max_latency: number
+}
+
+type RecentEvent = {
+  log_id: number
+  request_id: string
+  detect_timestamp: string
+  client_ip: string | null
+  client_port: number | null
+  server_ip: string | null
+  server_port: number | null
+  host: string | null
+  path: string | null
+  method: string | null
+  url_norm: string | null
+  decision: string
+  reason: string | null
+  decision_stage: string
+  policy_id: number | null
+  user_agent: string | null
+  engine_latency_ms: number | null
+  inject_attempted: number | null
+  inject_send: number | null
+  inject_errno: number | null
+  inject_latency_ms: number | null
+  inject_status_code: number | null
+  ai_score: number | null
+  ai_label: string | null
+  ai_model_version: string | null
+  ai_latency_ms: number | null
+  ai_error_code: string | null
+}
+
+type DashboardResponse = {
+  summary: DashboardSummary
+  requests_over_time: HourRequests[]
+  block_vs_allow_over_time: HourDecisionSeries[]
+  top_hosts: CountByHost[]
+  top_paths: CountByPath[]
+  ai_score_distribution: ScoreBucket[]
+  ai_latency_over_time: LatencySeries[]
+  recent_events: RecentEvent[]
+  last_hours: number
+}
+
+function getBaseUrl(): string {
+  const v = process.env.NEXT_PUBLIC_FASTAPI_BASE_URL
+  if (v && v.trim()) return v.trim().replace(/\/+$/, "")
+
+  if (typeof window !== "undefined") {
+    const proto = window.location.protocol
+    const host = window.location.hostname
+    return `${proto}//${host}:8000`
+  }
+
+  return "http://192.168.1.24:8000"
+}
+
+async function fetchDashboardSummary(lastHours: number): Promise<DashboardResponse> {
+  const url = `${getBaseUrl()}/v1/dashboard/summary?last_hours=${lastHours}`
+
+  const res = await fetch(url, {
+    method: "GET",
+    cache: "no-store",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+    },
+  })
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "")
+    throw new Error(`${res.status} ${res.statusText} ${text}`)
+  }
+
+  return (await res.json()) as DashboardResponse
+}
+
+function formatNumber(v: number | null | undefined): string {
+  return Number(v || 0).toLocaleString()
+}
+
+function formatPercent(v: number | null | undefined): string {
+  return `${Number(v || 0).toFixed(1)}%`
+}
+
+function formatTimestamp(value: string | null | undefined): string {
+  if (!value) return "N/A"
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return value
+  return d.toLocaleString()
+}
 
 export default function DashboardPage() {
-  const recentLogs = mockAccessLogs.slice(0, 8)
+  const [lastHours, setLastHours] = useState<number>(24)
+  const [loading, setLoading] = useState<boolean>(false)
+  const [error, setError] = useState<string>("")
+  const [data, setData] = useState<DashboardResponse | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function run() {
+      setLoading(true)
+      setError("")
+      try {
+        const res = await fetchDashboardSummary(lastHours)
+        if (!cancelled) {
+          setData(res)
+        }
+      } catch (e: any) {
+        if (!cancelled) {
+          setError(e?.message || "Failed to load dashboard")
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false)
+        }
+      }
+    }
+
+    run()
+
+    return () => {
+      cancelled = true
+    }
+  }, [lastHours])
+
+  const kpis = useMemo(() => {
+    const summary = data?.summary
+    return [
+      {
+        label: "Total Requests",
+        value: formatNumber(summary?.total_requests),
+        icon: Globe,
+        color: "#2563EB",
+      },
+      {
+        label: "Blocked Requests",
+        value: formatNumber(summary?.blocked_requests),
+        icon: ShieldOff,
+        color: "#dc2626",
+      },
+      {
+        label: "Block Rate",
+        value: formatPercent(summary?.block_rate),
+        icon: Percent,
+        color: "#d97706",
+      },
+      {
+        label: "AI-Enforced Blocks",
+        value: formatNumber(summary?.ai_enforced_blocks),
+        icon: Brain,
+        color: "#7c3aed",
+      },
+      {
+        label: "Policy-Enforced Blocks",
+        value: formatNumber(summary?.policy_enforced_blocks),
+        icon: FileText,
+        color: "#2563EB",
+      },
+      {
+        label: "Open Incidents",
+        value: formatNumber(summary?.open_incidents),
+        icon: AlertTriangle,
+        color: "#d97706",
+      },
+    ]
+  }, [data])
+
+  const requestsOverTime = data?.requests_over_time ?? []
+  const blockVsAllowOverTime = data?.block_vs_allow_over_time ?? []
+  const topHosts = data?.top_hosts ?? []
+  const topPaths = data?.top_paths ?? []
+  const aiScoreDistribution = data?.ai_score_distribution ?? []
+  const aiLatencyOverTime = data?.ai_latency_over_time ?? []
+  const recentEvents = data?.recent_events ?? []
 
   return (
     <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="text-xl font-semibold text-foreground">Dashboard</h1>
-        <p className="text-sm text-muted-foreground">Security operations overview</p>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold text-foreground">Dashboard</h1>
+          <p className="text-sm text-muted-foreground">
+            Security operations overview
+            {loading ? " · Loading..." : ""}
+            {error ? ` · ${error}` : ""}
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <Button
+            variant={lastHours === 24 ? "default" : "outline"}
+            size="sm"
+            className="h-8 text-xs"
+            onClick={() => setLastHours(24)}
+            disabled={loading}
+          >
+            24h
+          </Button>
+          <Button
+            variant={lastHours === 48 ? "default" : "outline"}
+            size="sm"
+            className="h-8 text-xs"
+            onClick={() => setLastHours(48)}
+            disabled={loading}
+          >
+            48h
+          </Button>
+          <Button
+            variant={lastHours === 72 ? "default" : "outline"}
+            size="sm"
+            className="h-8 text-xs"
+            onClick={() => setLastHours(72)}
+            disabled={loading}
+          >
+            72h
+          </Button>
+        </div>
       </div>
 
-      {/* KPI Cards */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-6">
-        {kpis.map(kpi => (
+        {kpis.map((kpi) => (
           <Card key={kpi.label} className="border shadow-sm">
             <CardContent className="flex flex-col gap-1 p-4">
               <div className="flex items-center gap-2">
@@ -63,7 +305,6 @@ export default function DashboardPage() {
         ))}
       </div>
 
-      {/* Charts Row 1 */}
       <div className="grid gap-4 lg:grid-cols-2">
         <Card className="border shadow-sm">
           <CardHeader className="pb-2">
@@ -102,7 +343,6 @@ export default function DashboardPage() {
         </Card>
       </div>
 
-      {/* Charts Row 2 */}
       <div className="grid gap-4 lg:grid-cols-2">
         <Card className="border shadow-sm">
           <CardHeader className="pb-2">
@@ -113,7 +353,14 @@ export default function DashboardPage() {
               <BarChart data={topHosts} layout="vertical">
                 <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                 <XAxis type="number" tick={{ fontSize: 11, fill: "#6b7280" }} tickLine={false} axisLine={false} />
-                <YAxis dataKey="host" type="category" tick={{ fontSize: 10, fill: "#6b7280" }} tickLine={false} axisLine={false} width={140} />
+                <YAxis
+                  dataKey="host"
+                  type="category"
+                  tick={{ fontSize: 10, fill: "#6b7280" }}
+                  tickLine={false}
+                  axisLine={false}
+                  width={140}
+                />
                 <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6, border: "1px solid #e5e7eb" }} />
                 <Bar dataKey="count" fill="#2563EB" radius={[0, 3, 3, 0]} />
               </BarChart>
@@ -130,7 +377,14 @@ export default function DashboardPage() {
               <BarChart data={topPaths} layout="vertical">
                 <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                 <XAxis type="number" tick={{ fontSize: 11, fill: "#6b7280" }} tickLine={false} axisLine={false} />
-                <YAxis dataKey="path" type="category" tick={{ fontSize: 10, fill: "#6b7280" }} tickLine={false} axisLine={false} width={140} />
+                <YAxis
+                  dataKey="path"
+                  type="category"
+                  tick={{ fontSize: 10, fill: "#6b7280" }}
+                  tickLine={false}
+                  axisLine={false}
+                  width={140}
+                />
                 <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6, border: "1px solid #e5e7eb" }} />
                 <Bar dataKey="count" fill="#059669" radius={[0, 3, 3, 0]} />
               </BarChart>
@@ -139,7 +393,6 @@ export default function DashboardPage() {
         </Card>
       </div>
 
-      {/* Charts Row 3 */}
       <div className="grid gap-4 lg:grid-cols-2">
         <Card className="border shadow-sm">
           <CardHeader className="pb-2">
@@ -170,20 +423,27 @@ export default function DashboardPage() {
                 <YAxis tick={{ fontSize: 11, fill: "#6b7280" }} tickLine={false} axisLine={false} unit="ms" />
                 <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6, border: "1px solid #e5e7eb" }} />
                 <Line type="monotone" dataKey="avg_latency" stroke="#2563EB" strokeWidth={2} dot={false} name="Avg" />
-                <Line type="monotone" dataKey="p95_latency" stroke="#dc2626" strokeWidth={1.5} dot={false} strokeDasharray="4 2" name="P95" />
+                <Line
+                  type="monotone"
+                  dataKey="max_latency"
+                  stroke="#dc2626"
+                  strokeWidth={1.5}
+                  dot={false}
+                  strokeDasharray="4 2"
+                  name="Max"
+                />
               </LineChart>
             </ResponsiveContainer>
           </CardContent>
         </Card>
       </div>
 
-      {/* Recent Security Events */}
       <Card className="border shadow-sm">
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
             <CardTitle className="text-sm font-semibold text-foreground">Recent Security Events</CardTitle>
             <Link href="/logs">
-              <Badge variant="outline" className="cursor-pointer text-xs font-normal gap-1">
+              <Badge variant="outline" className="cursor-pointer gap-1 text-xs font-normal">
                 View all <ExternalLink className="size-3" />
               </Badge>
             </Link>
@@ -204,17 +464,37 @@ export default function DashboardPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {recentLogs.map(log => (
+              {!loading && recentEvents.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={8} className="py-10 text-center text-sm text-muted-foreground">
+                    No recent events found.
+                  </TableCell>
+                </TableRow>
+              ) : null}
+
+              {recentEvents.map((log) => (
                 <TableRow key={log.log_id} className="text-xs">
                   <TableCell className="font-mono text-[11px] text-muted-foreground">
-                    {new Date(log.detect_timestamp).toLocaleString("en-US", { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                    {formatTimestamp(log.detect_timestamp)}
                   </TableCell>
-                  <TableCell className="font-mono text-[11px]">{log.client_ip}</TableCell>
-                  <TableCell className="max-w-[160px] truncate text-foreground font-medium">{log.host}</TableCell>
-                  <TableCell className="max-w-[120px] truncate text-muted-foreground">{log.path}</TableCell>
-                  <TableCell><StatusChip value={log.decision} /></TableCell>
-                  <TableCell><StatusChip value={log.decision_stage} type="stage" /></TableCell>
-                  <TableCell className="font-mono text-[11px]">{log.engine_latency_ms}ms</TableCell>
+                  <TableCell className="font-mono text-[11px]">{log.client_ip || "N/A"}</TableCell>
+                  <TableCell className="max-w-[160px] truncate font-medium text-foreground">
+                    {log.host || "N/A"}
+                  </TableCell>
+                  <TableCell className="max-w-[120px] truncate text-muted-foreground">
+                    {log.path || "N/A"}
+                  </TableCell>
+                  <TableCell>
+                    <StatusChip value={log.decision || "ERROR"} />
+                  </TableCell>
+                  <TableCell>
+                    <StatusChip value={log.decision_stage || "FAIL_STAGE"} type="stage" />
+                  </TableCell>
+                  <TableCell className="font-mono text-[11px]">
+                    {log.engine_latency_ms !== null && log.engine_latency_ms !== undefined
+                      ? `${log.engine_latency_ms}ms`
+                      : "N/A"}
+                  </TableCell>
                   <TableCell>
                     <Link href={`/logs/${log.log_id}`}>
                       <Button variant="ghost" size="sm" className="h-6 px-2 text-xs text-primary">

@@ -24,8 +24,35 @@ import { apiListLogs, type AccessLogItem, type ListLogsResponse } from "@/lib/ap
 
 const PAGE_SIZE = 15
 
+type FiltersState = {
+  decision: string
+  stage: string
+  host: string
+  clientIp: string
+  startTime: string
+  endTime: string
+  minScore: string
+  maxScore: string
+  injectAttempted: string
+  injectSend: string
+  injectStatusCode: string
+}
+
+const INITIAL_FILTERS: FiltersState = {
+  decision: "all",
+  stage: "all",
+  host: "",
+  clientIp: "",
+  startTime: "",
+  endTime: "",
+  minScore: "",
+  maxScore: "",
+  injectAttempted: "all",
+  injectSend: "all",
+  injectStatusCode: "",
+}
+
 export default function LogsPage() {
-  // useSearchParams() 빌드 안정화를 위해 Suspense로 감싼다
   return (
     <Suspense fallback={<LogsPageSkeleton />}>
       <LogsPageInner />
@@ -56,6 +83,7 @@ function LogsPageSkeleton() {
   )
 }
 
+// 디바운스 훅
 function useDebounced<T>(value: T, delayMs: number): T {
   const [v, setV] = useState(value)
   useEffect(() => {
@@ -65,16 +93,25 @@ function useDebounced<T>(value: T, delayMs: number): T {
   return v
 }
 
+// datetime-local -> "YYYY-MM-DD HH:MM:SS"
+function toApiDateTime(value: string): string | undefined {
+  if (!value) return undefined
+  return `${value.replace("T", " ")}:00`
+}
+
+// 숫자 문자열 -> number
+function toNumberOrUndefined(value: string): number | undefined {
+  const s = value.trim()
+  if (!s) return undefined
+  const n = Number(s)
+  return Number.isFinite(n) ? n : undefined
+}
+
 function LogsPageInner() {
   const searchParams = useSearchParams()
   const fromSlack = searchParams.get("from") === "slack"
 
-  const [filters, setFilters] = useState({
-    decision: "all",
-    stage: "all",
-    host: "",
-    clientIp: "",
-  })
+  const [filters, setFilters] = useState<FiltersState>(INITIAL_FILTERS)
   const [page, setPage] = useState(1)
   const [sortField, setSortField] = useState<string>("detect_timestamp")
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc")
@@ -85,26 +122,54 @@ function LogsPageInner() {
 
   const offset = (page - 1) * PAGE_SIZE
 
-  // 텍스트 필터는 디바운스해서 과도한 호출 방지
+  // 텍스트 입력 디바운스
   const hostDebounced = useDebounced(filters.host.trim(), 300)
   const clientIpDebounced = useDebounced(filters.clientIp.trim(), 300)
+  const startTimeDebounced = useDebounced(filters.startTime, 200)
+  const endTimeDebounced = useDebounced(filters.endTime, 200)
+  const minScoreDebounced = useDebounced(filters.minScore.trim(), 300)
+  const maxScoreDebounced = useDebounced(filters.maxScore.trim(), 300)
+  const injectStatusCodeDebounced = useDebounced(filters.injectStatusCode.trim(), 300)
 
-  // API 호출 파라미터 고정 (FastAPI와 UI 간 계약)
+  // API 파라미터
   const apiParams = useMemo(() => {
     return {
       limit: PAGE_SIZE,
       offset,
       decision: filters.decision !== "all" ? filters.decision : undefined,
       stage: filters.stage !== "all" ? filters.stage : undefined,
-      host: hostDebounced ? hostDebounced : undefined,
-      client_ip: clientIpDebounced ? clientIpDebounced : undefined,
+      host: hostDebounced || undefined,
+      client_ip: clientIpDebounced || undefined,
+      start_time: toApiDateTime(startTimeDebounced),
+      end_time: toApiDateTime(endTimeDebounced),
+      min_score: toNumberOrUndefined(minScoreDebounced),
+      max_score: toNumberOrUndefined(maxScoreDebounced),
+      inject_attempted: filters.injectAttempted !== "all" ? Number(filters.injectAttempted) : undefined,
+      inject_send: filters.injectSend !== "all" ? Number(filters.injectSend) : undefined,
+      inject_status_code: toNumberOrUndefined(injectStatusCodeDebounced),
       sort: sortField || "detect_timestamp",
       dir: sortDir || "desc",
     }
-  }, [filters.decision, filters.stage, hostDebounced, clientIpDebounced, offset, sortField, sortDir])
+  }, [
+    filters.decision,
+    filters.stage,
+    filters.injectAttempted,
+    filters.injectSend,
+    hostDebounced,
+    clientIpDebounced,
+    startTimeDebounced,
+    endTimeDebounced,
+    minScoreDebounced,
+    maxScoreDebounced,
+    injectStatusCodeDebounced,
+    offset,
+    sortField,
+    sortDir,
+  ])
 
   useEffect(() => {
     let cancelled = false
+
     async function run() {
       setLoading(true)
       setError("")
@@ -117,6 +182,7 @@ function LogsPageInner() {
         if (!cancelled) setLoading(false)
       }
     }
+
     run()
     return () => {
       cancelled = true
@@ -129,7 +195,7 @@ function LogsPageInner() {
 
   function handleSort(field: string) {
     if (sortField === field) {
-      setSortDir(d => (d === "asc" ? "desc" : "asc"))
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"))
     } else {
       setSortField(field)
       setSortDir("desc")
@@ -138,10 +204,15 @@ function LogsPageInner() {
   }
 
   function clearFilters() {
-    setFilters({ decision: "all", stage: "all", host: "", clientIp: "" })
+    setFilters(INITIAL_FILTERS)
     setPage(1)
     setSortField("detect_timestamp")
     setSortDir("desc")
+  }
+
+  function updateFilter<K extends keyof FiltersState>(key: K, value: FiltersState[K]) {
+    setFilters((prev) => ({ ...prev, [key]: value }))
+    setPage(1)
   }
 
   const SortIndicator = ({ field }: { field: string }) =>
@@ -151,7 +222,14 @@ function LogsPageInner() {
     (filters.decision !== "all" ? 1 : 0) +
     (filters.stage !== "all" ? 1 : 0) +
     (filters.host.trim() ? 1 : 0) +
-    (filters.clientIp.trim() ? 1 : 0)
+    (filters.clientIp.trim() ? 1 : 0) +
+    (filters.startTime ? 1 : 0) +
+    (filters.endTime ? 1 : 0) +
+    (filters.minScore.trim() ? 1 : 0) +
+    (filters.maxScore.trim() ? 1 : 0) +
+    (filters.injectAttempted !== "all" ? 1 : 0) +
+    (filters.injectSend !== "all" ? 1 : 0) +
+    (filters.injectStatusCode.trim() ? 1 : 0)
 
   return (
     <div className="flex flex-col gap-4">
@@ -192,18 +270,12 @@ function LogsPageInner() {
         </div>
       )}
 
-      {/* Filters */}
+      {/* 필터 영역 */}
       <Card className="border shadow-sm">
         <CardContent className="flex flex-wrap items-end gap-3 p-3">
           <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Decision</label>
-            <Select
-              value={filters.decision}
-              onValueChange={v => {
-                setFilters(f => ({ ...f, decision: v }))
-                setPage(1)
-              }}
-            >
+            <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Decision</label>
+            <Select value={filters.decision} onValueChange={(v) => updateFilter("decision", v)}>
               <SelectTrigger className="h-8 w-[130px] text-xs"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All</SelectItem>
@@ -216,14 +288,8 @@ function LogsPageInner() {
           </div>
 
           <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Stage</label>
-            <Select
-              value={filters.stage}
-              onValueChange={v => {
-                setFilters(f => ({ ...f, stage: v }))
-                setPage(1)
-              }}
-            >
+            <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Stage</label>
+            <Select value={filters.stage} onValueChange={(v) => updateFilter("stage", v)}>
               <SelectTrigger className="h-8 w-[150px] text-xs"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All</SelectItem>
@@ -235,35 +301,112 @@ function LogsPageInner() {
           </div>
 
           <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Host</label>
+            <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Host</label>
             <div className="relative">
               <Search className="absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
               <Input
                 placeholder="Search host..."
                 value={filters.host}
-                onChange={e => {
-                  setFilters(f => ({ ...f, host: e.target.value }))
-                  setPage(1)
-                }}
+                onChange={(e) => updateFilter("host", e.target.value)}
                 className="h-8 w-[220px] pl-7 text-xs"
               />
             </div>
           </div>
 
           <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Client IP</label>
+            <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Client IP</label>
             <div className="relative">
               <Search className="absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
               <Input
                 placeholder="Search client IP..."
                 value={filters.clientIp}
-                onChange={e => {
-                  setFilters(f => ({ ...f, clientIp: e.target.value }))
-                  setPage(1)
-                }}
+                onChange={(e) => updateFilter("clientIp", e.target.value)}
                 className="h-8 w-[220px] pl-7 text-xs"
               />
             </div>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Start Time</label>
+            <Input
+              type="datetime-local"
+              value={filters.startTime}
+              onChange={(e) => updateFilter("startTime", e.target.value)}
+              className="h-8 w-[190px] text-xs"
+            />
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">End Time</label>
+            <Input
+              type="datetime-local"
+              value={filters.endTime}
+              onChange={(e) => updateFilter("endTime", e.target.value)}
+              className="h-8 w-[190px] text-xs"
+            />
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Min Score</label>
+            <Input
+              type="number"
+              min="0"
+              max="1"
+              step="0.0001"
+              placeholder="0.0000"
+              value={filters.minScore}
+              onChange={(e) => updateFilter("minScore", e.target.value)}
+              className="h-8 w-[120px] text-xs"
+            />
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Max Score</label>
+            <Input
+              type="number"
+              min="0"
+              max="1"
+              step="0.0001"
+              placeholder="1.0000"
+              value={filters.maxScore}
+              onChange={(e) => updateFilter("maxScore", e.target.value)}
+              className="h-8 w-[120px] text-xs"
+            />
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Inject Attempted</label>
+            <Select value={filters.injectAttempted} onValueChange={(v) => updateFilter("injectAttempted", v)}>
+              <SelectTrigger className="h-8 w-[140px] text-xs"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All</SelectItem>
+                <SelectItem value="1">Yes</SelectItem>
+                <SelectItem value="0">No</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Inject Send</label>
+            <Select value={filters.injectSend} onValueChange={(v) => updateFilter("injectSend", v)}>
+              <SelectTrigger className="h-8 w-[120px] text-xs"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All</SelectItem>
+                <SelectItem value="1">Success</SelectItem>
+                <SelectItem value="0">Fail</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Inject Code</label>
+            <Input
+              type="number"
+              placeholder="403"
+              value={filters.injectStatusCode}
+              onChange={(e) => updateFilter("injectStatusCode", e.target.value)}
+              className="h-8 w-[110px] text-xs"
+            />
           </div>
 
           <div className="ml-auto flex items-center gap-2">
@@ -274,13 +417,13 @@ function LogsPageInner() {
         </CardContent>
       </Card>
 
-      {/* Table */}
-      <Card className="border shadow-sm overflow-hidden">
+      {/* 로그 테이블 */}
+      <Card className="overflow-hidden border shadow-sm">
         <CardContent className="p-0">
           <Table>
             <TableHeader>
               <TableRow className="bg-muted/50">
-                <TableHead className="text-[11px] w-[110px]">
+                <TableHead className="w-[90px] text-[11px]">
                   <button className="hover:underline" onClick={() => handleSort("log_id")}>
                     ID<SortIndicator field="log_id" />
                   </button>
@@ -292,14 +435,24 @@ function LogsPageInner() {
                 </TableHead>
                 <TableHead className="text-[11px]">Client</TableHead>
                 <TableHead className="text-[11px]">Host / Path</TableHead>
-                <TableHead className="text-[11px] w-[120px]">
+                <TableHead className="w-[120px] text-[11px]">
                   <button className="hover:underline" onClick={() => handleSort("decision")}>
                     Decision<SortIndicator field="decision" />
                   </button>
                 </TableHead>
-                <TableHead className="text-[11px] w-[140px]">
+                <TableHead className="w-[140px] text-[11px]">
                   <button className="hover:underline" onClick={() => handleSort("decision_stage")}>
                     Stage<SortIndicator field="decision_stage" />
+                  </button>
+                </TableHead>
+                <TableHead className="w-[90px] text-[11px]">
+                  <button className="hover:underline" onClick={() => handleSort("ai_score")}>
+                    AI Score<SortIndicator field="ai_score" />
+                  </button>
+                </TableHead>
+                <TableHead className="w-[110px] text-[11px]">
+                  <button className="hover:underline" onClick={() => handleSort("inject_status_code")}>
+                    Inject<SortIndicator field="inject_status_code" />
                   </button>
                 </TableHead>
                 <TableHead className="text-[11px]">Reason</TableHead>
@@ -309,16 +462,18 @@ function LogsPageInner() {
             <TableBody>
               {!loading && items.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={7} className="py-10 text-center text-sm text-muted-foreground">
+                  <TableCell colSpan={9} className="py-10 text-center text-sm text-muted-foreground">
                     No logs found.
                   </TableCell>
                 </TableRow>
               ) : null}
 
               {items.map((it) => {
-                const client = it.client_ip && it.client_port ? `${it.client_ip}:${it.client_port}` : it.client_ip || "N/A"
+                const client =
+                  it.client_ip && it.client_port ? `${it.client_ip}:${it.client_port}` : it.client_ip || "N/A"
                 const host = it.host || "N/A"
                 const path = it.path || "N/A"
+
                 return (
                   <TableRow key={it.log_id} className="text-xs">
                     <TableCell className="font-mono text-[11px]">
@@ -335,9 +490,9 @@ function LogsPageInner() {
                       {client}
                     </TableCell>
 
-                    <TableCell className="max-w-[520px]">
-                      <div className="font-mono text-[11px] truncate">{host}</div>
-                      <div className="font-mono text-[11px] text-muted-foreground truncate">{path}</div>
+                    <TableCell className="max-w-[420px]">
+                      <div className="truncate font-mono text-[11px]">{host}</div>
+                      <div className="truncate font-mono text-[11px] text-muted-foreground">{path}</div>
                     </TableCell>
 
                     <TableCell>
@@ -346,6 +501,16 @@ function LogsPageInner() {
 
                     <TableCell>
                       <StatusChip value={String(it.decision_stage || "FAIL_STAGE")} type="stage" />
+                    </TableCell>
+
+                    <TableCell className="font-mono text-[11px]">
+                      {typeof it.ai_score === "number" ? it.ai_score.toFixed(4) : "—"}
+                    </TableCell>
+
+                    <TableCell className="font-mono text-[11px]">
+                      {it.inject_attempted === 1
+                        ? `${it.inject_send === 1 ? "OK" : "FAIL"} / ${it.inject_status_code ?? "—"}`
+                        : "—"}
                     </TableCell>
 
                     <TableCell className="font-mono text-[11px] text-muted-foreground">
@@ -359,7 +524,7 @@ function LogsPageInner() {
         </CardContent>
       </Card>
 
-      {/* Pagination */}
+      {/* 페이지네이션 */}
       <div className="flex items-center justify-between">
         <div className="text-xs text-muted-foreground">
           Page {page} / {totalPages} · Showing {items.length} of {total}
@@ -370,7 +535,7 @@ function LogsPageInner() {
             variant="outline"
             size="sm"
             className="h-8 text-xs"
-            onClick={() => setPage(p => Math.max(1, p - 1))}
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
             disabled={page <= 1 || loading}
           >
             Prev
@@ -379,7 +544,7 @@ function LogsPageInner() {
             variant="outline"
             size="sm"
             className="h-8 text-xs"
-            onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
             disabled={page >= totalPages || loading}
           >
             Next

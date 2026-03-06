@@ -1,13 +1,24 @@
 "use client"
 
-import { Suspense, useMemo, useState } from "react"
+/*
+AI Analysis Page
+
+역할
+- /v1/logs API 기반 AI 분석 결과 조회
+- ai_score 존재하는 로그만 AI 분석 데이터로 사용
+- 기존 UI (필터 / 차트 / 테이블 / 페이지네이션) 유지
+*/
+
+import { Suspense, useEffect, useMemo, useState } from "react"
 import Link from "next/link"
+
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { StatusChip } from "@/components/status-chip"
+
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -16,7 +27,9 @@ import {
   BreadcrumbPage,
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb"
+
 import { X } from "lucide-react"
+
 import {
   BarChart,
   Bar,
@@ -31,160 +44,401 @@ import {
   Pie,
   Cell,
 } from "recharts"
-import { mockAIAnalyses, aiScoreDistribution, aiLatencyOverTime } from "@/lib/mock-data"
+
+import { apiListLogs, AccessLogItem } from "@/lib/api-client"
 
 const COLORS = ["#dc2626", "#f59e0b", "#10b981", "#6b7280"]
 const PAGE_SIZE = 15
 
 export default function AIAnalysisPage() {
   return (
-    <Suspense fallback={<AIAnalysisPageSkeleton />}>
+    <Suspense fallback={<div className="min-h-screen" />}>
       <AIAnalysisPageInner />
     </Suspense>
   )
 }
 
-function AIAnalysisPageSkeleton() {
-  return <div className="min-h-screen bg-background" />
-}
-
 function AIAnalysisPageInner() {
-  const [filters, setFilters] = useState({ label: "all", model: "all", minScore: "", maxScore: "" })
+
+  /* 로그 데이터 */
+  const [logs, setLogs] = useState<AccessLogItem[]>([])
+
+  /* 상태 관리 */
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState("")
+
+  /* 필터 상태 */
+  const [filters, setFilters] = useState({
+    label: "all",
+    model: "all",
+    minScore: "",
+    maxScore: "",
+  })
+
+  /* 페이지 */
   const [page, setPage] = useState(1)
 
-  const models = useMemo(() => [...new Set(mockAIAnalyses.map(a => a.model_version))], [])
 
+  /*
+  로그 API 호출
+  */
+  useEffect(() => {
+
+    async function load() {
+
+      try {
+
+        const res = await apiListLogs({ limit: 300 })
+
+        setLogs(res.items)
+
+      } catch (e: any) {
+
+        setError(e?.message || "Failed to load AI analysis")
+
+      } finally {
+
+        setLoading(false)
+
+      }
+
+    }
+
+    load()
+
+  }, [])
+
+
+
+  /*
+  AI 분석 로그 추출
+  label 정규화
+  */
+  const aiLogs = useMemo(() => {
+
+    return logs
+      .filter(l => l.ai_score !== null)
+      .map(l => ({
+        ...l,
+        ai_label: (l.ai_label ?? "unknown").toLowerCase(),
+      }))
+
+  }, [logs])
+
+
+
+  /*
+  모델 목록 생성
+  */
+  const models = useMemo(() => {
+
+    return [...new Set(aiLogs.map(a => a.ai_model_version).filter((v): v is string => Boolean(v)))]
+
+  }, [aiLogs])
+
+
+
+  /*
+  Label 분포 계산
+  */
   const labelDistribution = useMemo(() => {
-    const counts: Record<string, number> = {}
-    mockAIAnalyses.forEach(a => {
-      counts[a.label] = (counts[a.label] || 0) + 1
-    })
-    return Object.entries(counts).map(([name, value]) => ({ name, value }))
-  }, [])
 
+    const counts: Record<string, number> = {}
+
+    aiLogs.forEach(a => {
+
+      const label = a.ai_label ?? "unknown"
+
+      counts[label] = (counts[label] || 0) + 1
+
+    })
+
+    return Object.entries(counts).map(([name, value]) => ({
+      name,
+      value
+    }))
+
+  }, [aiLogs])
+
+
+
+  /*
+  모델 사용량 계산
+  */
   const modelUsage = useMemo(() => {
+
     const counts: Record<string, number> = {}
-    mockAIAnalyses.forEach(a => {
-      counts[a.model_version] = (counts[a.model_version] || 0) + 1
+
+    aiLogs.forEach(a => {
+
+      const model = a.ai_model_version ?? "unknown"
+
+      counts[model] = (counts[model] || 0) + 1
+
     })
-    return Object.entries(counts).map(([model, count]) => ({ model, count }))
-  }, [])
 
+    return Object.entries(counts).map(([model, count]) => ({
+      model,
+      count
+    }))
+
+  }, [aiLogs])
+
+
+
+  /*
+  Latency 추세 계산
+  */
+  const aiLatencyOverTime = useMemo(() => {
+
+    const buckets: Record<string, number[]> = {}
+
+    aiLogs.forEach(l => {
+
+      const hour = (l.detect_timestamp ?? "").slice(0, 13)
+
+      if (!buckets[hour]) buckets[hour] = []
+
+      if (l.ai_latency_ms !== null)
+        buckets[hour].push(l.ai_latency_ms as number)
+
+    })
+
+    return Object.entries(buckets).map(([hour, values]) => ({
+
+      hour,
+
+      avg_latency:
+        values.reduce((a, b) => a + b, 0) / values.length || 0
+
+    }))
+
+  }, [aiLogs])
+
+
+
+  /*
+  Score 분포 계산
+  */
+  const aiScoreDistribution = useMemo(() => {
+
+    const ranges = Array.from({ length: 10 }).map((_, i) => ({
+      range: `${(i / 10).toFixed(1)}-${((i + 1) / 10).toFixed(1)}`,
+      count: 0
+    }))
+
+    aiLogs.forEach(l => {
+
+      if (l.ai_score === null) return
+
+      const idx = Math.min(9, Math.floor(l.ai_score * 10))
+
+      ranges[idx].count++
+
+    })
+
+    return ranges
+
+  }, [aiLogs])
+
+
+
+  /*
+  필터 적용
+  */
   const filtered = useMemo(() => {
-    let data = [...mockAIAnalyses]
-    if (filters.label !== "all") data = data.filter(a => a.label === filters.label)
-    if (filters.model !== "all") data = data.filter(a => a.model_version === filters.model)
-    if (filters.minScore) data = data.filter(a => a.score >= Number(filters.minScore))
-    if (filters.maxScore) data = data.filter(a => a.score <= Number(filters.maxScore))
-    return data.sort((a, b) => new Date(b.analyzed_at).getTime() - new Date(a.analyzed_at).getTime())
-  }, [filters])
 
-  const totalPages = Math.ceil(filtered.length / PAGE_SIZE)
-  const paginated = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+    let data = [...aiLogs]
+
+    if (filters.label !== "all")
+      data = data.filter(a => a.ai_label === filters.label)
+
+    if (filters.model !== "all")
+      data = data.filter(a => a.ai_model_version === filters.model)
+
+    if (filters.minScore)
+      data = data.filter(a => (a.ai_score ?? 0) >= Number(filters.minScore))
+
+    if (filters.maxScore)
+      data = data.filter(a => (a.ai_score ?? 0) <= Number(filters.maxScore))
+
+    return data.sort(
+      (a, b) =>
+        new Date(b.detect_timestamp).getTime() -
+        new Date(a.detect_timestamp).getTime()
+    )
+
+  }, [filters, aiLogs])
+
+
+
+  /*
+  페이지 계산
+  */
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
+
+  const paginated = filtered.slice(
+    (page - 1) * PAGE_SIZE,
+    page * PAGE_SIZE
+  )
+
+
+
+  if (loading)
+    return <div className="p-4 text-sm">Loading AI analysis...</div>
+
 
   return (
     <div className="flex flex-col gap-4">
+
+      {error && (
+        <div className="text-sm text-destructive">
+          {error}
+        </div>
+      )}
+
       <Breadcrumb>
         <BreadcrumbList>
+
           <BreadcrumbItem>
-            <BreadcrumbLink href="/dashboard">Dashboard</BreadcrumbLink>
+            <BreadcrumbLink href="/dashboard">
+              Dashboard
+            </BreadcrumbLink>
           </BreadcrumbItem>
+
           <BreadcrumbSeparator />
+
           <BreadcrumbItem>
-            <BreadcrumbPage>AI Analysis</BreadcrumbPage>
+            <BreadcrumbPage>
+              AI Analysis
+            </BreadcrumbPage>
           </BreadcrumbItem>
+
         </BreadcrumbList>
       </Breadcrumb>
 
+
       <div>
-        <h1 className="text-xl font-semibold text-foreground">AI Analysis</h1>
-        <p className="text-sm text-muted-foreground">{filtered.length} analysis records</p>
+        <h1 className="text-xl font-semibold text-foreground">
+          AI Analysis
+        </h1>
+
+        <p className="text-sm text-muted-foreground">
+          {filtered.length} analysis records
+        </p>
       </div>
 
+
+
+      {/* Chart 영역 */}
       <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-4">
+
         <Card className="border shadow-sm">
           <CardHeader className="pb-2">
-            <CardTitle className="text-xs font-semibold text-foreground">Score Distribution</CardTitle>
+            <CardTitle className="text-xs font-semibold">
+              Score Distribution
+            </CardTitle>
           </CardHeader>
+
           <CardContent>
             <ResponsiveContainer width="100%" height={160}>
               <BarChart data={aiScoreDistribution}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                <XAxis dataKey="range" tick={{ fontSize: 9, fill: "#6b7280" }} tickLine={false} axisLine={false} />
-                <YAxis tick={{ fontSize: 9, fill: "#6b7280" }} tickLine={false} axisLine={false} />
-                <Tooltip contentStyle={{ fontSize: 11, borderRadius: 6, border: "1px solid #e5e7eb" }} />
-                <Bar dataKey="count" fill="#2563EB" radius={[2, 2, 0, 0]} />
+                <CartesianGrid strokeDasharray="3 3"/>
+                <XAxis dataKey="range"/>
+                <YAxis/>
+                <Tooltip/>
+                <Bar dataKey="count" fill="#2563EB"/>
               </BarChart>
             </ResponsiveContainer>
           </CardContent>
         </Card>
 
+
         <Card className="border shadow-sm">
           <CardHeader className="pb-2">
-            <CardTitle className="text-xs font-semibold text-foreground">Label Distribution</CardTitle>
+            <CardTitle className="text-xs font-semibold">
+              Label Distribution
+            </CardTitle>
           </CardHeader>
-          <CardContent className="flex items-center justify-center">
+
+          <CardContent>
             <ResponsiveContainer width="100%" height={160}>
               <PieChart>
                 <Pie
                   data={labelDistribution}
                   dataKey="value"
                   nameKey="name"
-                  cx="50%"
-                  cy="50%"
                   outerRadius={55}
                   innerRadius={30}
-                  paddingAngle={2}
                 >
                   {labelDistribution.map((_, i) => (
                     <Cell key={i} fill={COLORS[i % COLORS.length]} />
                   ))}
                 </Pie>
-                <Tooltip contentStyle={{ fontSize: 11, borderRadius: 6, border: "1px solid #e5e7eb" }} />
+                <Tooltip/>
               </PieChart>
             </ResponsiveContainer>
           </CardContent>
         </Card>
 
+
         <Card className="border shadow-sm">
           <CardHeader className="pb-2">
-            <CardTitle className="text-xs font-semibold text-foreground">Latency Trend</CardTitle>
+            <CardTitle className="text-xs font-semibold">
+              Latency Trend
+            </CardTitle>
           </CardHeader>
+
           <CardContent>
             <ResponsiveContainer width="100%" height={160}>
               <LineChart data={aiLatencyOverTime}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                <XAxis dataKey="hour" tick={{ fontSize: 9, fill: "#6b7280" }} tickLine={false} axisLine={false} />
-                <YAxis tick={{ fontSize: 9, fill: "#6b7280" }} tickLine={false} axisLine={false} />
-                <Tooltip contentStyle={{ fontSize: 11, borderRadius: 6, border: "1px solid #e5e7eb" }} />
-                <Line type="monotone" dataKey="avg_latency" stroke="#2563EB" strokeWidth={1.5} dot={false} />
+                <CartesianGrid strokeDasharray="3 3"/>
+                <XAxis dataKey="hour"/>
+                <YAxis/>
+                <Tooltip/>
+                <Line
+                  type="monotone"
+                  dataKey="avg_latency"
+                  stroke="#2563EB"
+                  dot={false}
+                />
               </LineChart>
             </ResponsiveContainer>
           </CardContent>
         </Card>
 
+
         <Card className="border shadow-sm">
           <CardHeader className="pb-2">
-            <CardTitle className="text-xs font-semibold text-foreground">Model Usage</CardTitle>
+            <CardTitle className="text-xs font-semibold">
+              Model Usage
+            </CardTitle>
           </CardHeader>
+
           <CardContent>
             <ResponsiveContainer width="100%" height={160}>
               <BarChart data={modelUsage}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                <XAxis dataKey="model" tick={{ fontSize: 9, fill: "#6b7280" }} tickLine={false} axisLine={false} />
-                <YAxis tick={{ fontSize: 9, fill: "#6b7280" }} tickLine={false} axisLine={false} />
-                <Tooltip contentStyle={{ fontSize: 11, borderRadius: 6, border: "1px solid #e5e7eb" }} />
-                <Bar dataKey="count" fill="#059669" radius={[2, 2, 0, 0]} />
+                <CartesianGrid strokeDasharray="3 3"/>
+                <XAxis dataKey="model"/>
+                <YAxis/>
+                <Tooltip/>
+                <Bar dataKey="count" fill="#059669"/>
               </BarChart>
             </ResponsiveContainer>
           </CardContent>
         </Card>
+
       </div>
 
+
+
+      {/* 필터 UI */}
       <Card className="border shadow-sm">
         <CardContent className="flex flex-wrap items-end gap-3 p-3">
+
           <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Label</label>
+            <label className="text-[11px] font-medium uppercase">Label</label>
+
             <Select
               value={filters.label}
               onValueChange={v => {
@@ -192,21 +446,26 @@ function AIAnalysisPageInner() {
                 setPage(1)
               }}
             >
+
               <SelectTrigger className="h-8 w-[130px] text-xs">
                 <SelectValue />
               </SelectTrigger>
+
               <SelectContent>
                 <SelectItem value="all">All</SelectItem>
-                <SelectItem value="MALICIOUS">Malicious</SelectItem>
-                <SelectItem value="SUSPICIOUS">Suspicious</SelectItem>
-                <SelectItem value="BENIGN">Benign</SelectItem>
-                <SelectItem value="UNKNOWN">Unknown</SelectItem>
+                <SelectItem value="malicious">Malicious</SelectItem>
+                <SelectItem value="suspicious">Suspicious</SelectItem>
+                <SelectItem value="benign">Benign</SelectItem>
+                <SelectItem value="unknown">Unknown</SelectItem>
               </SelectContent>
+
             </Select>
           </div>
 
+
           <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Model</label>
+            <label className="text-[11px] font-medium uppercase">Model</label>
+
             <Select
               value={filters.model}
               onValueChange={v => {
@@ -214,22 +473,29 @@ function AIAnalysisPageInner() {
                 setPage(1)
               }}
             >
+
               <SelectTrigger className="h-8 w-[120px] text-xs">
                 <SelectValue />
               </SelectTrigger>
+
               <SelectContent>
                 <SelectItem value="all">All</SelectItem>
+
                 {models.map(m => (
                   <SelectItem key={m} value={m}>
                     {m}
                   </SelectItem>
                 ))}
+
               </SelectContent>
+
             </Select>
           </div>
 
+
           <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Min Score</label>
+            <label className="text-[11px] font-medium uppercase">Min Score</label>
+
             <Input
               type="number"
               step="0.1"
@@ -240,13 +506,14 @@ function AIAnalysisPageInner() {
                 setFilters(f => ({ ...f, minScore: e.target.value }))
                 setPage(1)
               }}
-              placeholder="0.0"
               className="h-8 w-[80px] text-xs"
             />
           </div>
 
+
           <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Max Score</label>
+            <label className="text-[11px] font-medium uppercase">Max Score</label>
+
             <Input
               type="number"
               step="0.1"
@@ -257,94 +524,128 @@ function AIAnalysisPageInner() {
                 setFilters(f => ({ ...f, maxScore: e.target.value }))
                 setPage(1)
               }}
-              placeholder="1.0"
               className="h-8 w-[80px] text-xs"
             />
           </div>
 
+
           <Button
             variant="ghost"
             size="sm"
-            className="h-8 text-xs text-muted-foreground"
+            className="h-8 text-xs"
             onClick={() => {
-              setFilters({ label: "all", model: "all", minScore: "", maxScore: "" })
+              setFilters({
+                label: "all",
+                model: "all",
+                minScore: "",
+                maxScore: ""
+              })
               setPage(1)
             }}
           >
-            <X className="mr-1 size-3" /> Clear
+            <X className="mr-1 size-3"/>
+            Clear
           </Button>
+
         </CardContent>
       </Card>
 
+
+
+      {/* 테이블 */}
       <Card className="border shadow-sm overflow-hidden">
+
         <Table>
+
           <TableHeader>
-            <TableRow className="bg-muted/50">
-              <TableHead className="text-[11px]">Analyzed At</TableHead>
-              <TableHead className="text-[11px]">Log ID</TableHead>
-              <TableHead className="text-[11px]">Score</TableHead>
-              <TableHead className="text-[11px]">Label</TableHead>
-              <TableHead className="text-[11px]">Latency</TableHead>
-              <TableHead className="text-[11px]">Model</TableHead>
-              <TableHead className="text-[11px]">Error</TableHead>
-              <TableHead className="text-[11px]">Seq</TableHead>
-              <TableHead className="text-[11px]">Response</TableHead>
+            <TableRow>
+              <TableHead>Timestamp</TableHead>
+              <TableHead>Log ID</TableHead>
+              <TableHead>Score</TableHead>
+              <TableHead>Label</TableHead>
+              <TableHead>Latency</TableHead>
+              <TableHead>Model</TableHead>
             </TableRow>
           </TableHeader>
+
           <TableBody>
-            {paginated.map(a => (
-              <TableRow key={a.ai_analysis_id} className="text-xs">
-                <TableCell className="font-mono text-[11px] text-muted-foreground">
-                  {new Date(a.analyzed_at).toLocaleString("en-US", {
-                    month: "short",
-                    day: "2-digit",
-                    hour: "2-digit",
-                    minute: "2-digit",
-                  })}
+
+            {paginated.map(log => (
+
+              <TableRow key={log.log_id}>
+
+                <TableCell className="font-mono">
+                  {new Date(log.detect_timestamp).toLocaleString()}
                 </TableCell>
+
                 <TableCell>
-                  <Link href={`/logs/${a.log_id}`} className="font-mono text-[11px] text-primary hover:underline">
-                    {a.log_id}
+                  <Link
+                    href={`/logs/${log.log_id}`}
+                    className="text-primary hover:underline"
+                  >
+                    {log.log_id}
                   </Link>
                 </TableCell>
-                <TableCell>
-                  <span
-                    className={`font-mono font-semibold text-[11px] ${
-                      a.score >= 0.7 ? "text-red-600" : a.score >= 0.5 ? "text-amber-600" : "text-emerald-600"
-                    }`}
-                  >
-                    {a.score.toFixed(3)}
-                  </span>
+
+                <TableCell className="font-mono">
+                  {log.ai_score?.toFixed(3)}
                 </TableCell>
+
                 <TableCell>
-                  <StatusChip value={a.label} type="aiLabel" />
+                  <StatusChip value={log.ai_label ?? "unknown"} type="aiLabel"/>
                 </TableCell>
-                <TableCell className="font-mono text-[11px]">{a.latency_ms}ms</TableCell>
-                <TableCell className="font-mono text-[11px] text-muted-foreground">{a.model_version}</TableCell>
-                <TableCell className="font-mono text-[11px] text-muted-foreground">{a.error_code || "\u2014"}</TableCell>
-                <TableCell className="text-[11px]">{a.analysis_seq}</TableCell>
-                <TableCell className="max-w-[200px] truncate text-[11px] text-muted-foreground">{a.ai_response}</TableCell>
+
+                <TableCell className="font-mono">
+                  {log.ai_latency_ms ?? "-"} ms
+                </TableCell>
+
+                <TableCell className="font-mono text-muted-foreground">
+                  {log.ai_model_version}
+                </TableCell>
+
               </TableRow>
+
             ))}
+
           </TableBody>
+
         </Table>
+
       </Card>
 
-      {totalPages > 1 && (
-        <div className="flex items-center justify-between text-sm">
-          <span className="text-xs text-muted-foreground">
-            Showing {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, filtered.length)} of {filtered.length}
-          </span>
-          <div className="flex items-center gap-1">
-            <Button variant="outline" size="sm" className="h-7 text-xs" disabled={page <= 1} onClick={() => setPage(p => p - 1)}>
-              Previous
-            </Button>
-            <Button variant="outline" size="sm" className="h-7 text-xs" disabled={page >= totalPages} onClick={() => setPage(p => p + 1)}>
-              Next
-            </Button>
-          </div>
+
+
+      {/* 페이지네이션 */}
+      <div className="flex items-center justify-between text-sm">
+
+        <span className="text-xs text-muted-foreground">
+          Showing {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, filtered.length)} of {filtered.length}
+        </span>
+
+        <div className="flex items-center gap-1">
+
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={page <= 1}
+            onClick={() => setPage(p => p - 1)}
+          >
+            Previous
+          </Button>
+
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={page >= totalPages}
+            onClick={() => setPage(p => p + 1)}
+          >
+            Next
+          </Button>
+
         </div>
-      )}
+
+      </div>
+
     </div>
   )
 }
