@@ -236,8 +236,13 @@ int ai_classify_url_ex(const HttpEvent* ev, const char* request_id, ai_result_t*
     out->ok = 1;
     out->error_code = AI_OK;
     out->score = score;
-    strncpy(out->label, label, sizeof(out->label) - 1);
-    if (ok_mv) strncpy(out->model_version, mv, sizeof(out->model_version) - 1);
+	snprintf(out->label, sizeof(out->label), "%s", label);
+
+	if (ok_mv) {
+		snprintf(out->model_version, sizeof(out->model_version), "%s", mv);
+	} else {
+		out->model_version[0] = '\0';
+	}
 
     free(mem.buf);
     return 1;
