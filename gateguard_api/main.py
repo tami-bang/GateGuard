@@ -2,7 +2,7 @@ import os
 import time
 import uuid
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Any, List, Dict
 
 import pymysql
@@ -884,6 +884,79 @@ def _list_policy_rules(conn, policy_id: int) -> List[dict]:
         )
         return cur.fetchall() or []
 
+@app.get("/v1/policy-audits")
+@app.get("/policy-audits")
+def list_policy_audits(
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    policy_id: Optional[int] = None,
+    action: Optional[str] = None,
+    source_review_id: Optional[int] = None,
+    sort: str = Query("changed_at"),
+    dir: str = Query("desc"),
+):
+    with db_conn() as conn:
+        audit_cols = _get_table_cols(conn, "policy_audit")
+
+        where = []
+        params: List[Any] = []
+
+        if policy_id is not None and "policy_id" in audit_cols:
+            where.append("pa.policy_id = %s")
+            params.append(int(policy_id))
+
+        if action and "action" in audit_cols:
+            where.append("pa.action = %s")
+            params.append(action)
+
+        if source_review_id is not None and "source_review_id" in audit_cols:
+            where.append("pa.source_review_id = %s")
+            params.append(int(source_review_id))
+
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
+        allowed_sort = [c for c in ["changed_at", "audit_id", "policy_id", "action", "changed_by"] if c in audit_cols]
+        if sort not in allowed_sort:
+            sort = "changed_at" if "changed_at" in audit_cols else (allowed_sort[0] if allowed_sort else "audit_id")
+
+        if (dir or "").lower() not in ("asc", "desc"):
+            dir = "desc"
+
+        order_sql = f"ORDER BY pa.{sort} {dir.upper()}"
+
+        count_sql = f"""
+        SELECT COUNT(*) AS cnt
+        FROM policy_audit pa
+        {where_sql}
+        """
+
+        data_sql = f"""
+        SELECT
+          pa.*,
+          p.policy_name
+        FROM policy_audit pa
+        LEFT JOIN policy p
+          ON p.policy_id = pa.policy_id
+        {where_sql}
+        {order_sql}
+        LIMIT %s OFFSET %s
+        """
+
+        with conn.cursor() as cur:
+            cur.execute(count_sql, params)
+            total = int(cur.fetchone()["cnt"])
+
+            cur.execute(data_sql, params + [limit, offset])
+            rows = cur.fetchall() or []
+
+    return {
+        "items": rows,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "sort": sort,
+        "dir": dir,
+    }
 
 @app.get("/v1/policies")
 @app.get("/policies")
@@ -1388,6 +1461,25 @@ def simple_score(host: str, path: Optional[str]) -> float:
 def label_from_score(score: float, threshold: float) -> str:
     return "malicious" if score >= threshold else "benign"
 
+def _security_event_filter_sql(alias: str = "al") -> str:
+    return f"""
+      {alias}.host IS NOT NULL
+      AND {alias}.host <> ''
+      AND {alias}.host NOT IN ('192.168.1.24:8080', '192.168.1.24')
+      AND (
+        {alias}.path IS NULL OR (
+          {alias}.path NOT LIKE '%%_rsc=%%'
+          AND {alias}.path NOT LIKE '/_next%%'
+          AND {alias}.path NOT LIKE '/api/auth%%'
+          AND {alias}.path NOT LIKE '/dashboard%%'
+          AND {alias}.path NOT LIKE '/logs%%'
+          AND {alias}.path NOT LIKE '/policies%%'
+          AND {alias}.path NOT LIKE '/ai-analysis%%'
+          AND {alias}.path NOT LIKE '/incidents%%'
+          AND {alias}.path NOT LIKE '/audit-log%%'
+        )
+      )
+    """
 
 @app.get("/v1/logs")
 def list_logs(
@@ -1397,10 +1489,29 @@ def list_logs(
     stage: Optional[str] = None,
     host: Optional[str] = None,
     client_ip: Optional[str] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    min_score: Optional[float] = Query(default=None, ge=0.0, le=1.0),
+    max_score: Optional[float] = Query(default=None, ge=0.0, le=1.0),
+    inject_attempted: Optional[int] = Query(default=None, ge=0, le=1),
+    inject_send: Optional[int] = Query(default=None, ge=0, le=1),
+    inject_status_code: Optional[int] = None,
     sort: Optional[str] = "detect_timestamp",
     dir: Optional[str] = "desc",
 ):
-    where = []
+    latest_ai_join_sql = """
+    LEFT JOIN (
+      SELECT x.*
+      FROM ai_analysis x
+      JOIN (
+        SELECT log_id, MAX(analysis_seq) AS max_seq
+        FROM ai_analysis
+        GROUP BY log_id
+      ) m ON m.log_id = x.log_id AND m.max_seq = x.analysis_seq
+    ) aa ON aa.log_id = al.log_id
+    """
+
+    where = [_security_event_filter_sql("al")]
     params: List[Any] = []
 
     if decision and decision != "all":
@@ -1419,9 +1530,38 @@ def list_logs(
         where.append("al.client_ip LIKE %s")
         params.append(f"%{client_ip}%")
 
-    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    if start_time:
+        where.append("al.detect_timestamp >= %s")
+        params.append(start_time)
+
+    if end_time:
+        where.append("al.detect_timestamp <= %s")
+        params.append(end_time)
+
+    if min_score is not None:
+        where.append("aa.score >= %s")
+        params.append(float(min_score))
+
+    if max_score is not None:
+        where.append("aa.score <= %s")
+        params.append(float(max_score))
+
+    if inject_attempted is not None:
+        where.append("al.inject_attempted = %s")
+        params.append(int(inject_attempted))
+
+    if inject_send is not None:
+        where.append("al.inject_send = %s")
+        params.append(int(inject_send))
+
+    if inject_status_code is not None:
+        where.append("al.inject_status_code = %s")
+        params.append(int(inject_status_code))
+
+    where_sql = "WHERE " + " AND ".join(where)
 
     allowed_sort = {
+        "log_id",
         "detect_timestamp",
         "client_ip",
         "host",
@@ -1430,6 +1570,8 @@ def list_logs(
         "decision_stage",
         "policy_id",
         "engine_latency_ms",
+        "inject_status_code",
+        "ai_score",
     }
 
     if sort not in allowed_sort:
@@ -1438,11 +1580,25 @@ def list_logs(
     if (dir or "").lower() not in ("asc", "desc"):
         dir = "desc"
 
-    order_sql = f"ORDER BY al.{sort} {dir.upper()}"
+    sort_sql_map = {
+        "log_id": "al.log_id",
+        "detect_timestamp": "al.detect_timestamp",
+        "client_ip": "al.client_ip",
+        "host": "al.host",
+        "path": "al.path",
+        "decision": "al.decision",
+        "decision_stage": "al.decision_stage",
+        "policy_id": "al.policy_id",
+        "engine_latency_ms": "al.engine_latency_ms",
+        "inject_status_code": "al.inject_status_code",
+        "ai_score": "aa.score",
+    }
+    order_sql = f"ORDER BY {sort_sql_map.get(sort, 'al.detect_timestamp')} {dir.upper()}"
 
     count_sql = f"""
-    SELECT COUNT(*)
+    SELECT COUNT(*) AS cnt
     FROM access_log al
+    {latest_ai_join_sql}
     {where_sql}
     """
 
@@ -1471,17 +1627,12 @@ def list_logs(
       al.inject_latency_ms,
       al.inject_status_code,
       aa.score AS ai_score,
-      aa.model_version AS ai_model_version
+      aa.label AS ai_label,
+      aa.model_version AS ai_model_version,
+      aa.latency_ms AS ai_latency_ms,
+      aa.error_code AS ai_error_code
     FROM access_log al
-    LEFT JOIN (
-      SELECT x.*
-      FROM ai_analysis x
-      JOIN (
-        SELECT log_id, MAX(analysis_seq) AS max_seq
-        FROM ai_analysis
-        GROUP BY log_id
-      ) m ON m.log_id = x.log_id AND m.max_seq = x.analysis_seq
-    ) aa ON aa.log_id = al.log_id
+    {latest_ai_join_sql}
     {where_sql}
     {order_sql}
     LIMIT %s OFFSET %s
@@ -1491,10 +1642,10 @@ def list_logs(
         with conn.cursor() as cur:
             cur.execute(count_sql, params)
             row = cur.fetchone()
-            total = int(next(iter(row.values()))) if row else 0
+            total = int(row["cnt"]) if row else 0
 
             cur.execute(data_sql, params + [limit, offset])
-            rows = cur.fetchall()
+            rows = cur.fetchall() or []
 
     return {
         "items": rows,
@@ -1504,8 +1655,7 @@ def list_logs(
         "sort": sort,
         "dir": dir,
     }
-
-
+ 
 @app.post("/v1/score", response_model=ScoreResponse)
 def score(req: ScoreRequest, authorization: Optional[str] = Header(default=None)):
     """
@@ -1589,3 +1739,330 @@ def get_log_detail(log_id: int):
             analyses = cur.fetchall()
 
     return {"log": log, "analyses": analyses}
+
+# =========================
+# Dashboard API
+# =========================
+
+def _build_hour_labels(last_hours: int) -> List[str]:
+    # 최근 N시간 라벨 생성
+    now = datetime.now().replace(minute=0, second=0, microsecond=0)
+    labels: List[str] = []
+    for i in range(last_hours - 1, -1, -1):
+        dt = now - timedelta(hours=i)
+        labels.append(dt.strftime("%m-%d %H:00"))
+    return labels
+
+
+def _series_map_to_list(labels: List[str], data_map: Dict[str, dict], defaults: dict) -> List[dict]:
+    # 누락 구간 0 채움
+    rows: List[dict] = []
+    for label in labels:
+        row = {"hour": label}
+        row.update(defaults)
+        if label in data_map:
+            row.update(data_map[label])
+        rows.append(row)
+    return rows
+
+
+@app.get("/v1/dashboard/summary")
+def get_dashboard_summary(
+    last_hours: int = Query(24, ge=1, le=168),
+):
+    # 최근 N시간 집계
+    window_start = datetime.now().replace(minute=0, second=0, microsecond=0) - timedelta(hours=last_hours - 1)
+    window_start_str = window_start.strftime("%Y-%m-%d %H:%M:%S")
+
+    latest_ai_join_sql = """
+    LEFT JOIN (
+      SELECT x.*
+      FROM ai_analysis x
+      JOIN (
+        SELECT log_id, MAX(analysis_seq) AS max_seq
+        FROM ai_analysis
+        GROUP BY log_id
+      ) m ON m.log_id = x.log_id AND m.max_seq = x.analysis_seq
+    ) aa ON aa.log_id = al.log_id
+    """
+
+    labels = _build_hour_labels(last_hours)
+    security_filter_sql = _security_event_filter_sql("al")
+
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            # KPI
+            cur.execute(
+                f"""
+                SELECT COUNT(*) AS cnt
+                FROM access_log al
+                WHERE al.detect_timestamp >= %s
+                  AND {security_filter_sql}
+                """,
+                (window_start_str,),
+            )
+            total_requests = int(cur.fetchone()["cnt"] or 0)
+
+            cur.execute(
+                f"""
+                SELECT COUNT(*) AS cnt
+                FROM access_log al
+                WHERE al.detect_timestamp >= %s
+                  AND al.decision='BLOCK'
+                  AND {security_filter_sql}
+                """,
+                (window_start_str,),
+            )
+            blocked_requests = int(cur.fetchone()["cnt"] or 0)
+
+            cur.execute(
+                f"""
+                SELECT COUNT(*) AS cnt
+                FROM access_log al
+                WHERE al.detect_timestamp >= %s
+                  AND al.decision='BLOCK'
+                  AND al.decision_stage='AI_STAGE'
+                  AND {security_filter_sql}
+                """,
+                (window_start_str,),
+            )
+            ai_enforced_blocks = int(cur.fetchone()["cnt"] or 0)
+
+            cur.execute(
+                f"""
+                SELECT COUNT(*) AS cnt
+                FROM access_log al
+                WHERE al.detect_timestamp >= %s
+                  AND al.decision='BLOCK'
+                  AND al.decision_stage='POLICY_STAGE'
+                  AND {security_filter_sql}
+                """,
+                (window_start_str,),
+            )
+            policy_enforced_blocks = int(cur.fetchone()["cnt"] or 0)
+
+            cur.execute(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM review_event
+                WHERE status='OPEN'
+                """
+            )
+            open_incidents = int(cur.fetchone()["cnt"] or 0)
+
+            block_rate = round((blocked_requests / total_requests * 100.0), 1) if total_requests > 0 else 0.0
+
+            # Requests Over Time
+            cur.execute(
+                f"""
+                SELECT
+                  DATE_FORMAT(al.detect_timestamp, '%%m-%%d %%H:00') AS hour,
+                  COUNT(*) AS requests
+                FROM access_log al
+                WHERE al.detect_timestamp >= %s
+                  AND {security_filter_sql}
+                GROUP BY DATE_FORMAT(al.detect_timestamp, '%%m-%%d %%H:00')
+                ORDER BY MIN(al.detect_timestamp) ASC
+                """,
+                (window_start_str,),
+            )
+            req_rows = cur.fetchall() or []
+            req_map = {r["hour"]: {"requests": int(r["requests"] or 0)} for r in req_rows}
+            requests_over_time = _series_map_to_list(labels, req_map, {"requests": 0})
+
+            # Block vs Allow Over Time
+            cur.execute(
+                f"""
+                SELECT
+                  DATE_FORMAT(al.detect_timestamp, '%%m-%%d %%H:00') AS hour,
+                  SUM(CASE WHEN al.decision='ALLOW' THEN 1 ELSE 0 END) AS allow_cnt,
+                  SUM(CASE WHEN al.decision='BLOCK' THEN 1 ELSE 0 END) AS block_cnt,
+                  SUM(CASE WHEN al.decision='REVIEW' THEN 1 ELSE 0 END) AS review_cnt
+                FROM access_log al
+                WHERE al.detect_timestamp >= %s
+                  AND {security_filter_sql}
+                GROUP BY DATE_FORMAT(al.detect_timestamp, '%%m-%%d %%H:00')
+                ORDER BY MIN(al.detect_timestamp) ASC
+                """,
+                (window_start_str,),
+            )
+            block_rows = cur.fetchall() or []
+            block_map = {
+                r["hour"]: {
+                    "allow": int(r["allow_cnt"] or 0),
+                    "block": int(r["block_cnt"] or 0),
+                    "review": int(r["review_cnt"] or 0),
+                }
+                for r in block_rows
+            }
+            block_vs_allow_over_time = _series_map_to_list(
+                labels,
+                block_map,
+                {"allow": 0, "block": 0, "review": 0},
+            )
+
+            # Top Hosts
+            cur.execute(
+                f"""
+                SELECT al.host, COUNT(*) AS cnt
+                FROM access_log al
+                WHERE al.detect_timestamp >= %s
+                  AND {security_filter_sql}
+                GROUP BY al.host
+                ORDER BY cnt DESC, al.host ASC
+                LIMIT 8
+                """,
+                (window_start_str,),
+            )
+            top_hosts = [{"host": r["host"], "count": int(r["cnt"] or 0)} for r in (cur.fetchall() or [])]
+
+            # Top Paths
+            cur.execute(
+                f"""
+                SELECT al.path, COUNT(*) AS cnt
+                FROM access_log al
+                WHERE al.detect_timestamp >= %s
+                  AND al.path IS NOT NULL
+                  AND al.path <> ''
+                  AND {security_filter_sql}
+                GROUP BY al.path
+                ORDER BY cnt DESC, al.path ASC
+                LIMIT 6
+                """,
+                (window_start_str,),
+            )
+            top_paths = [{"path": r["path"], "count": int(r["cnt"] or 0)} for r in (cur.fetchall() or [])]
+
+            # AI Score Distribution
+            cur.execute(
+                """
+                SELECT
+                  CASE
+                    WHEN score < 0.1 THEN '0.0-0.1'
+                    WHEN score < 0.2 THEN '0.1-0.2'
+                    WHEN score < 0.3 THEN '0.2-0.3'
+                    WHEN score < 0.4 THEN '0.3-0.4'
+                    WHEN score < 0.5 THEN '0.4-0.5'
+                    WHEN score < 0.6 THEN '0.5-0.6'
+                    WHEN score < 0.7 THEN '0.6-0.7'
+                    WHEN score < 0.8 THEN '0.7-0.8'
+                    WHEN score < 0.9 THEN '0.8-0.9'
+                    ELSE '0.9-1.0'
+                  END AS score_range,
+                  COUNT(*) AS cnt
+                FROM ai_analysis
+                WHERE analyzed_at >= %s
+                  AND score IS NOT NULL
+                GROUP BY score_range
+                """,
+                (window_start_str,),
+            )
+            dist_rows = cur.fetchall() or []
+            dist_map = {r["score_range"]: int(r["cnt"] or 0) for r in dist_rows}
+
+            score_ranges = [
+                "0.0-0.1",
+                "0.1-0.2",
+                "0.2-0.3",
+                "0.3-0.4",
+                "0.4-0.5",
+                "0.5-0.6",
+                "0.6-0.7",
+                "0.7-0.8",
+                "0.8-0.9",
+                "0.9-1.0",
+            ]
+            ai_score_distribution = [
+                {"range": score_range, "count": dist_map.get(score_range, 0)}
+                for score_range in score_ranges
+            ]
+
+            # AI Latency Over Time
+            cur.execute(
+                """
+                SELECT
+                  DATE_FORMAT(analyzed_at, '%%m-%%d %%H:00') AS hour,
+                  ROUND(AVG(latency_ms), 0) AS avg_latency,
+                  MAX(latency_ms) AS max_latency
+                FROM ai_analysis
+                WHERE analyzed_at >= %s
+                  AND latency_ms IS NOT NULL
+                GROUP BY DATE_FORMAT(analyzed_at, '%%m-%%d %%H:00')
+                ORDER BY MIN(analyzed_at) ASC
+                """,
+                (window_start_str,),
+            )
+            latency_rows = cur.fetchall() or []
+            latency_map = {
+                r["hour"]: {
+                    "avg_latency": int(r["avg_latency"] or 0),
+                    "max_latency": int(r["max_latency"] or 0),
+                }
+                for r in latency_rows
+            }
+            ai_latency_over_time = _series_map_to_list(
+                labels,
+                latency_map,
+                {"avg_latency": 0, "max_latency": 0},
+            )
+
+            # Recent Security Events
+            cur.execute(
+                f"""
+                SELECT
+                  al.log_id,
+                  al.request_id,
+                  al.detect_timestamp,
+                  al.client_ip,
+                  al.client_port,
+                  al.server_ip,
+                  al.server_port,
+                  al.host,
+                  al.path,
+                  al.method,
+                  al.url_norm,
+                  al.decision,
+                  al.reason,
+                  al.decision_stage,
+                  al.policy_id,
+                  al.user_agent,
+                  al.engine_latency_ms,
+                  al.inject_attempted,
+                  al.inject_send,
+                  al.inject_errno,
+                  al.inject_latency_ms,
+                  al.inject_status_code,
+                  aa.score AS ai_score,
+                  aa.label AS ai_label,
+                  aa.model_version AS ai_model_version,
+                  aa.latency_ms AS ai_latency_ms,
+                  aa.error_code AS ai_error_code
+                FROM access_log al
+                {latest_ai_join_sql}
+                WHERE al.detect_timestamp >= %s
+                  AND {security_filter_sql}
+                ORDER BY al.detect_timestamp DESC, al.log_id DESC
+                LIMIT 8
+                """,
+                (window_start_str,),
+            )
+            recent_events = cur.fetchall() or []
+
+    return {
+        "summary": {
+            "total_requests": total_requests,
+            "blocked_requests": blocked_requests,
+            "block_rate": block_rate,
+            "ai_enforced_blocks": ai_enforced_blocks,
+            "policy_enforced_blocks": policy_enforced_blocks,
+            "open_incidents": open_incidents,
+        },
+        "requests_over_time": requests_over_time,
+        "block_vs_allow_over_time": block_vs_allow_over_time,
+        "top_hosts": top_hosts,
+        "top_paths": top_paths,
+        "ai_score_distribution": ai_score_distribution,
+        "ai_latency_over_time": ai_latency_over_time,
+        "recent_events": recent_events,
+        "last_hours": last_hours,
+    }

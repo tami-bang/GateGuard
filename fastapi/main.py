@@ -874,6 +874,79 @@ def _list_policy_rules(conn, policy_id: int) -> List[dict]:
         )
         return cur.fetchall() or []
 
+@app.get("/v1/policy-audits")
+@app.get("/policy-audits")
+def list_policy_audits(
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    policy_id: Optional[int] = None,
+    action: Optional[str] = None,
+    source_review_id: Optional[int] = None,
+    sort: str = Query("changed_at"),
+    dir: str = Query("desc"),
+):
+    with db_conn() as conn:
+        audit_cols = _get_table_cols(conn, "policy_audit")
+
+        where = []
+        params: List[Any] = []
+
+        if policy_id is not None and "policy_id" in audit_cols:
+            where.append("pa.policy_id = %s")
+            params.append(int(policy_id))
+
+        if action and "action" in audit_cols:
+            where.append("pa.action = %s")
+            params.append(action)
+
+        if source_review_id is not None and "source_review_id" in audit_cols:
+            where.append("pa.source_review_id = %s")
+            params.append(int(source_review_id))
+
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
+        allowed_sort = [c for c in ["changed_at", "audit_id", "policy_id", "action", "changed_by"] if c in audit_cols]
+        if sort not in allowed_sort:
+            sort = "changed_at" if "changed_at" in audit_cols else (allowed_sort[0] if allowed_sort else "audit_id")
+
+        if (dir or "").lower() not in ("asc", "desc"):
+            dir = "desc"
+
+        order_sql = f"ORDER BY pa.{sort} {dir.upper()}"
+
+        count_sql = f"""
+        SELECT COUNT(*) AS cnt
+        FROM policy_audit pa
+        {where_sql}
+        """
+
+        data_sql = f"""
+        SELECT
+          pa.*,
+          p.policy_name
+        FROM policy_audit pa
+        LEFT JOIN policy p
+          ON p.policy_id = pa.policy_id
+        {where_sql}
+        {order_sql}
+        LIMIT %s OFFSET %s
+        """
+
+        with conn.cursor() as cur:
+            cur.execute(count_sql, params)
+            total = int(cur.fetchone()["cnt"])
+
+            cur.execute(data_sql, params + [limit, offset])
+            rows = cur.fetchall() or []
+
+    return {
+        "items": rows,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "sort": sort,
+        "dir": dir,
+    }
 
 @app.get("/v1/policies")
 @app.get("/policies")
