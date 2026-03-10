@@ -52,6 +52,9 @@ engine_C/Host*
 engine_C/ORDER*
 engine_C/SELECT*
 engine_C/User-Agent*
+engine_C/gateguard_engine
+engine_C/*.o
+engine_C/nohup.out
 
 # FastAPI stray file
 fastapi/=

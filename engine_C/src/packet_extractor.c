@@ -49,9 +49,18 @@ static int starts_with_method(const unsigned char* p, size_t len)
 
 static int looks_like_http_request(const unsigned char* payload, size_t len)
 {
-    // MVP: payload 시작이 request line인 경우만 잡는다.
-    // (TCP 세그먼트 분할/재전송으로 놓칠 수 있으므로, host missing 처리로 DB insert는 유지)
-    return starts_with_method(payload, len);
+	if (!payload || len == 0) return 0;
+
+    if (starts_with_method(payload, len))
+        return 1;
+
+    if (gg_memmem(payload, len, (const unsigned char*)"Host:", 5))
+        return 1;
+
+    if (gg_memmem(payload, len, (const unsigned char*)"\r\nHost:", 7))
+        return 1;
+
+    return 0;
 }
 
 static const unsigned char* find_host_header(const unsigned char* payload, size_t payload_len)
@@ -215,7 +224,7 @@ int packet_extractor_run_pcap_loop(const char* ifname)
     }
 
     struct bpf_program fp;
-    if (pcap_compile(p, &fp, "tcp and (port 80 or port 8080)", 1, PCAP_NETMASK_UNKNOWN) != 0)
+    if (pcap_compile(p, &fp, "tcp and (port 80 or port 8080 or port 18080)", 1, PCAP_NETMASK_UNKNOWN) != 0)
     {
         printf("pcap_compile failed\n");
         pcap_close(p);
