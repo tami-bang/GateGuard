@@ -115,6 +115,14 @@ type DashboardResponse = {
   last_hours: number
 }
 
+type KpiItem = {
+  label: string
+  value: string
+  icon: typeof Globe
+  color: string
+  href: string
+}
+
 function getBaseUrl(): string {
   const v = process.env.NEXT_PUBLIC_FASTAPI_BASE_URL
   if (v && v.trim()) return v.trim().replace(/\/+$/, "")
@@ -198,7 +206,7 @@ export default function DashboardPage() {
     }
   }, [lastHours])
 
-  const kpis = useMemo(() => {
+  const kpis = useMemo<KpiItem[]>(() => {
     const summary = data?.summary
     return [
       {
@@ -206,36 +214,42 @@ export default function DashboardPage() {
         value: formatNumber(summary?.total_requests),
         icon: Globe,
         color: "#2563EB",
+        href: "/logs",
       },
       {
         label: "Blocked Requests",
         value: formatNumber(summary?.blocked_requests),
         icon: ShieldOff,
         color: "#dc2626",
+        href: "/logs?decision=BLOCK",
       },
       {
         label: "Block Rate",
         value: formatPercent(summary?.block_rate),
         icon: Percent,
         color: "#d97706",
+        href: "/logs?decision=BLOCK",
       },
       {
         label: "AI-Enforced Blocks",
         value: formatNumber(summary?.ai_enforced_blocks),
         icon: Brain,
         color: "#7c3aed",
+        href: "/logs?decision=BLOCK&stage=AI_STAGE",
       },
       {
         label: "Policy-Enforced Blocks",
         value: formatNumber(summary?.policy_enforced_blocks),
         icon: FileText,
         color: "#2563EB",
+        href: "/logs?decision=BLOCK&stage=POLICY_STAGE",
       },
       {
         label: "Open Incidents",
         value: formatNumber(summary?.open_incidents),
         icon: AlertTriangle,
         color: "#d97706",
+        href: "/incidents",
       },
     ]
   }, [data])
@@ -293,15 +307,17 @@ export default function DashboardPage() {
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-6">
         {kpis.map((kpi) => (
-          <Card key={kpi.label} className="border shadow-sm">
-            <CardContent className="flex flex-col gap-1 p-4">
-              <div className="flex items-center gap-2">
-                <kpi.icon className="size-4" style={{ color: kpi.color }} />
-                <span className="text-xs font-medium text-muted-foreground">{kpi.label}</span>
-              </div>
-              <span className="text-2xl font-bold text-foreground">{kpi.value}</span>
-            </CardContent>
-          </Card>
+          <Link key={kpi.label} href={kpi.href}>
+            <Card className="cursor-pointer border shadow-sm transition-colors hover:bg-muted/40">
+              <CardContent className="flex flex-col gap-1 p-4">
+                <div className="flex items-center gap-2">
+                  <kpi.icon className="size-4" style={{ color: kpi.color }} />
+                  <span className="text-xs font-medium text-muted-foreground">{kpi.label}</span>
+                </div>
+                <span className="text-2xl font-bold text-foreground">{kpi.value}</span>
+              </CardContent>
+            </Card>
+          </Link>
         ))}
       </div>
 
@@ -346,7 +362,14 @@ export default function DashboardPage() {
       <div className="grid gap-4 lg:grid-cols-2">
         <Card className="border shadow-sm">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-semibold text-foreground">Top Target Hosts</CardTitle>
+            <div className="flex items-center justify-between gap-3">
+              <CardTitle className="text-sm font-semibold text-foreground">Top Target Hosts</CardTitle>
+              <Link href="/logs">
+                <Badge variant="outline" className="cursor-pointer gap-1 text-xs font-normal">
+                  Open Logs <ExternalLink className="size-3" />
+                </Badge>
+              </Link>
+            </div>
           </CardHeader>
           <CardContent>
             <ResponsiveContainer width="100%" height={220}>
@@ -365,12 +388,31 @@ export default function DashboardPage() {
                 <Bar dataKey="count" fill="#2563EB" radius={[0, 3, 3, 0]} />
               </BarChart>
             </ResponsiveContainer>
+
+            <div className="mt-3 flex flex-col gap-1">
+              {topHosts.slice(0, 5).map((item) => (
+                <Link
+                  key={item.host}
+                  href={`/logs?host=${encodeURIComponent(item.host)}`}
+                  className="text-xs text-primary hover:underline"
+                >
+                  {item.host} ({item.count})
+                </Link>
+              ))}
+            </div>
           </CardContent>
         </Card>
 
         <Card className="border shadow-sm">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-semibold text-foreground">Top Target Paths</CardTitle>
+            <div className="flex items-center justify-between gap-3">
+              <CardTitle className="text-sm font-semibold text-foreground">Top Target Paths</CardTitle>
+              <Link href="/logs">
+                <Badge variant="outline" className="cursor-pointer gap-1 text-xs font-normal">
+                  Open Logs <ExternalLink className="size-3" />
+                </Badge>
+              </Link>
+            </div>
           </CardHeader>
           <CardContent>
             <ResponsiveContainer width="100%" height={220}>
@@ -389,6 +431,18 @@ export default function DashboardPage() {
                 <Bar dataKey="count" fill="#059669" radius={[0, 3, 3, 0]} />
               </BarChart>
             </ResponsiveContainer>
+
+            <div className="mt-3 flex flex-col gap-1">
+              {topPaths.slice(0, 5).map((item) => (
+                <div
+                  key={`${item.path}-${item.count}`}
+                  className="truncate text-xs text-muted-foreground"
+                  title={item.path}
+                >
+                  {item.path} ({item.count})
+                </div>
+              ))}
+            </div>
           </CardContent>
         </Card>
       </div>

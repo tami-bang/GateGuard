@@ -46,13 +46,55 @@ function fmt(ts: string | null | undefined): string {
   })
 }
 
-function parseSnapshot(raw: string | null | undefined): unknown {
+function parseSnapshot(raw: string | null | undefined): Record<string, any> | null {
   if (!raw) return null
   try {
-    return JSON.parse(raw)
+    const parsed = JSON.parse(raw)
+    if (parsed && typeof parsed === "object") return parsed
+    return { value: parsed }
   } catch {
-    return raw
+    return { value: raw }
   }
+}
+
+function getPolicyObject(snapshot: Record<string, any> | null): Record<string, any> | null {
+  if (!snapshot) return null
+  if (snapshot.policy && typeof snapshot.policy === "object") return snapshot.policy
+  return snapshot
+}
+
+function stringifyValue(value: any): string {
+  if (value === null) return "null"
+  if (value === undefined) return "undefined"
+  if (typeof value === "string") return value
+  return JSON.stringify(value)
+}
+
+type DiffRow = {
+  key: string
+  beforeValue: any
+  afterValue: any
+  changed: boolean
+}
+
+function buildDiffRows(beforeObj: Record<string, any> | null, afterObj: Record<string, any> | null): DiffRow[] {
+  const beforePolicy = getPolicyObject(beforeObj) ?? {}
+  const afterPolicy = getPolicyObject(afterObj) ?? {}
+
+  const keys = Array.from(new Set([...Object.keys(beforePolicy), ...Object.keys(afterPolicy)]))
+
+  return keys
+    .sort((a, b) => a.localeCompare(b))
+    .map((key) => {
+      const beforeValue = beforePolicy[key]
+      const afterValue = afterPolicy[key]
+      return {
+        key,
+        beforeValue,
+        afterValue,
+        changed: JSON.stringify(beforeValue) !== JSON.stringify(afterValue),
+      }
+    })
 }
 
 export default function AuditLogPage() {
@@ -102,6 +144,11 @@ export default function AuditLogPage() {
   const selectedAfter = useMemo(
     () => parseSnapshot(selectedAudit?.after_snapshot),
     [selectedAudit]
+  )
+
+  const diffRows = useMemo(
+    () => buildDiffRows(selectedBefore, selectedAfter),
+    [selectedBefore, selectedAfter]
   )
 
   return (
@@ -224,7 +271,7 @@ export default function AuditLogPage() {
       </Card>
 
       <Sheet open={!!selectedAudit} onOpenChange={() => setSelectedAudit(null)}>
-        <SheetContent className="w-[500px] overflow-y-auto sm:max-w-[500px]">
+        <SheetContent className="w-[760px] overflow-y-auto sm:max-w-[760px]">
           <SheetHeader>
             <SheetTitle className="text-foreground">Audit Detail</SheetTitle>
             <SheetDescription>
@@ -259,26 +306,61 @@ export default function AuditLogPage() {
                 </p>
               </div>
 
+              <div className="rounded-md border">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-muted/50">
+                      <TableHead className="text-[11px]">Field</TableHead>
+                      <TableHead className="text-[11px]">Before</TableHead>
+                      <TableHead className="text-[11px]">After</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {diffRows.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={3} className="py-8 text-center text-sm text-muted-foreground">
+                          No comparable fields found
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      diffRows.map((row) => (
+                        <TableRow key={row.key} className="align-top">
+                          <TableCell className="font-mono text-[11px] text-muted-foreground">
+                            {row.key}
+                          </TableCell>
+                          <TableCell className="font-mono text-[11px]">
+                            <span className={row.changed ? "text-muted-foreground" : "text-foreground"}>
+                              {stringifyValue(row.beforeValue)}
+                            </span>
+                          </TableCell>
+                          <TableCell className="font-mono text-[11px]">
+                            <span className={row.changed ? "font-semibold text-red-600" : "text-foreground"}>
+                              {stringifyValue(row.afterValue)}
+                            </span>
+                          </TableCell>
+                        </TableRow>
+                      ))
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                    Before
+                    Raw Before
                   </h4>
-                  <pre className="max-h-[300px] overflow-auto rounded-md border border-red-200 bg-red-50 p-3 text-[11px] font-mono text-foreground">
-                    {selectedBefore !== null
-                      ? JSON.stringify(selectedBefore, null, 2)
-                      : "null (new record)"}
+                  <pre className="max-h-[240px] overflow-auto rounded-md border border-red-200 bg-red-50 p-3 text-[11px] font-mono text-foreground">
+                    {selectedBefore !== null ? JSON.stringify(selectedBefore, null, 2) : "null (new record)"}
                   </pre>
                 </div>
 
                 <div>
                   <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                    After
+                    Raw After
                   </h4>
-                  <pre className="max-h-[300px] overflow-auto rounded-md border border-emerald-200 bg-emerald-50 p-3 text-[11px] font-mono text-foreground">
-                    {selectedAfter !== null
-                      ? JSON.stringify(selectedAfter, null, 2)
-                      : "null (deleted)"}
+                  <pre className="max-h-[240px] overflow-auto rounded-md border border-emerald-200 bg-emerald-50 p-3 text-[11px] font-mono text-foreground">
+                    {selectedAfter !== null ? JSON.stringify(selectedAfter, null, 2) : "null (deleted)"}
                   </pre>
                 </div>
               </div>
