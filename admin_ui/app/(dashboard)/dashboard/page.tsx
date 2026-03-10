@@ -16,6 +16,10 @@ import {
   FileText,
   AlertTriangle,
   ExternalLink,
+  Server,
+  Database,
+  Cpu,
+  Activity,
 } from "lucide-react"
 import {
   AreaChart,
@@ -115,12 +119,25 @@ type DashboardResponse = {
   last_hours: number
 }
 
+type SystemHealthResponse = {
+  engine: string
+  fastapi: string
+  mariadb: string
+  ai_model: string
+}
+
 type KpiItem = {
   label: string
   value: string
   icon: typeof Globe
   color: string
   href: string
+}
+
+type HealthItem = {
+  label: string
+  value: string
+  icon: typeof Server
 }
 
 function getBaseUrl(): string {
@@ -136,6 +153,7 @@ function getBaseUrl(): string {
   return "http://192.168.1.24:8000"
 }
 
+// 대시보드 요약 조회
 async function fetchDashboardSummary(lastHours: number): Promise<DashboardResponse> {
   const url = `${getBaseUrl()}/v1/dashboard/summary?last_hours=${lastHours}`
 
@@ -156,6 +174,27 @@ async function fetchDashboardSummary(lastHours: number): Promise<DashboardRespon
   return (await res.json()) as DashboardResponse
 }
 
+// 시스템 상태 조회
+async function fetchSystemHealth(): Promise<SystemHealthResponse> {
+  const url = `${getBaseUrl()}/v1/system/health`
+
+  const res = await fetch(url, {
+    method: "GET",
+    cache: "no-store",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+    },
+  })
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "")
+    throw new Error(`${res.status} ${res.statusText} ${text}`)
+  }
+
+  return (await res.json()) as SystemHealthResponse
+}
+
 function formatNumber(v: number | null | undefined): string {
   return Number(v || 0).toLocaleString()
 }
@@ -171,12 +210,50 @@ function formatTimestamp(value: string | null | undefined): string {
   return d.toLocaleString()
 }
 
+// 상태 라벨 변환
+function normalizeHealthLabel(value: string | null | undefined): string {
+  const v = String(value || "").toLowerCase()
+
+  if (v === "active") return "RUNNING"
+  if (v === "inactive") return "STOPPED"
+  if (v === "failed") return "FAILED"
+  if (v === "activating") return "STARTING"
+  if (v === "deactivating") return "STOPPING"
+  if (v === "loaded") return "LOADED"
+  if (v === "missing") return "MISSING"
+
+  return value || "UNKNOWN"
+}
+
+// 상태 배지 스타일
+function getHealthBadgeClass(value: string | null | undefined): string {
+  const v = String(value || "").toLowerCase()
+
+  if (v === "active" || v === "loaded") {
+    return "border-emerald-200 bg-emerald-50 text-emerald-700"
+  }
+  if (v === "inactive" || v === "missing") {
+    return "border-amber-200 bg-amber-50 text-amber-700"
+  }
+  if (v === "failed") {
+    return "border-red-200 bg-red-50 text-red-700"
+  }
+
+  return "border-slate-200 bg-slate-50 text-slate-700"
+}
+
 export default function DashboardPage() {
   const [lastHours, setLastHours] = useState<number>(24)
   const [loading, setLoading] = useState<boolean>(false)
   const [error, setError] = useState<string>("")
   const [data, setData] = useState<DashboardResponse | null>(null)
 
+  // 시스템 상태 state
+  const [healthLoading, setHealthLoading] = useState<boolean>(false)
+  const [healthError, setHealthError] = useState<string>("")
+  const [health, setHealth] = useState<SystemHealthResponse | null>(null)
+
+  // 대시보드 통계 로드
   useEffect(() => {
     let cancelled = false
 
@@ -205,6 +282,37 @@ export default function DashboardPage() {
       cancelled = true
     }
   }, [lastHours])
+
+  // 시스템 상태 로드
+  useEffect(() => {
+    let cancelled = false
+
+    async function run() {
+      setHealthLoading(true)
+      setHealthError("")
+
+      try {
+        const res = await fetchSystemHealth()
+        if (!cancelled) {
+          setHealth(res)
+        }
+      } catch (e: any) {
+        if (!cancelled) {
+          setHealthError(e?.message || "Failed to load system health")
+        }
+      } finally {
+        if (!cancelled) {
+          setHealthLoading(false)
+        }
+      }
+    }
+
+    run()
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const kpis = useMemo<KpiItem[]>(() => {
     const summary = data?.summary
@@ -253,6 +361,32 @@ export default function DashboardPage() {
       },
     ]
   }, [data])
+
+  // 시스템 상태 카드 데이터
+  const healthItems = useMemo<HealthItem[]>(() => {
+    return [
+      {
+        label: "Engine",
+        value: normalizeHealthLabel(health?.engine),
+        icon: Activity,
+      },
+      {
+        label: "FastAPI",
+        value: normalizeHealthLabel(health?.fastapi),
+        icon: Server,
+      },
+      {
+        label: "MariaDB",
+        value: normalizeHealthLabel(health?.mariadb),
+        icon: Database,
+      },
+      {
+        label: "AI Model",
+        value: normalizeHealthLabel(health?.ai_model),
+        icon: Cpu,
+      },
+    ]
+  }, [health])
 
   const requestsOverTime = data?.requests_over_time ?? []
   const blockVsAllowOverTime = data?.block_vs_allow_over_time ?? []
@@ -320,6 +454,47 @@ export default function DashboardPage() {
           </Link>
         ))}
       </div>
+
+      {/* 시스템 상태 카드 */}
+      <Card className="border shadow-sm">
+        <CardHeader className="pb-2">
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle className="text-sm font-semibold text-foreground">System Status</CardTitle>
+            <Badge variant="outline" className="text-xs font-normal">
+              {healthLoading ? "Loading..." : healthError ? "Health Check Error" : "Live Status"}
+            </Badge>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            {healthItems.map((item) => (
+              <div
+                key={item.label}
+                className="flex items-center justify-between rounded-lg border bg-muted/20 px-4 py-3"
+              >
+                <div className="flex items-center gap-3">
+                  <item.icon className="size-4 text-muted-foreground" />
+                  <div className="flex flex-col">
+                    <span className="text-xs text-muted-foreground">{item.label}</span>
+                    <span className="text-sm font-medium text-foreground">{item.value}</span>
+                  </div>
+                </div>
+                <span
+                  className={`rounded-full border px-2 py-1 text-[11px] font-medium ${getHealthBadgeClass(
+                    health?.[item.label.toLowerCase() as keyof SystemHealthResponse] || item.value
+                  )}`}
+                >
+                  {item.value}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          {healthError ? (
+            <div className="mt-3 text-xs text-red-600">{healthError}</div>
+          ) : null}
+        </CardContent>
+      </Card>
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Card className="border shadow-sm">

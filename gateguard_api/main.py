@@ -2,6 +2,7 @@ import os
 import time
 import uuid
 import json
+import subprocess
 from datetime import datetime, timedelta
 from typing import Optional, Any, List, Dict
 
@@ -9,7 +10,6 @@ import pymysql
 from fastapi import FastAPI, Header, HTTPException, Query, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-
 
 def load_env(path: str) -> None:
     if not os.path.exists(path):
@@ -1654,6 +1654,35 @@ def list_logs(
         "offset": offset,
         "sort": sort,
         "dir": dir,
+    }
+
+# FastAPI Health API
+@app.get("/v1/system/health")
+def system_health():
+    def check_service(service):
+        try:
+            result = subprocess.run(
+                ["systemctl", "is-active", service],
+                capture_output=True,
+                text=True
+            )
+            return result.stdout.strip()
+        except Exception:
+            return "unknown"
+
+    engine = check_service("gateguard-engine")
+    fastapi = check_service("gateguard-fastapi")
+    mariadb = check_service("mariadb")
+
+    model_path = "/home/ktech/GateGuard/ml/model.pkl"
+
+    ai_model = "loaded" if os.path.exists(model_path) else "missing"
+
+    return {
+        "engine": engine,
+        "fastapi": fastapi,
+        "mariadb": mariadb,
+        "ai_model": ai_model
     }
  
 @app.post("/v1/score", response_model=ScoreResponse)
