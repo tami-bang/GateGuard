@@ -9,7 +9,14 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Textarea } from "@/components/ui/textarea"
 import { StatusChip } from "@/components/status-chip"
-import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from "@/components/ui/breadcrumb"
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbLink,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb"
 import { ArrowLeft, ExternalLink, Loader2 } from "lucide-react"
 
 import {
@@ -26,6 +33,19 @@ function fmt(ts: string | null | undefined): string {
   return d.toLocaleString()
 }
 
+function getAiScoreSafe(log: unknown): string {
+  if (!log || typeof log !== "object") return "N/A"
+
+  const maybeLog = log as Record<string, unknown>
+  const value = maybeLog.ai_score
+
+  if (value === null || value === undefined) return "N/A"
+  if (typeof value === "number") return value.toFixed(4)
+  if (typeof value === "string" && value.trim()) return value
+
+  return "N/A"
+}
+
 export default function IncidentDetailPage() {
   const params = useParams<{ id: string }>()
   const router = useRouter()
@@ -37,20 +57,25 @@ export default function IncidentDetailPage() {
 
   const [note, setNote] = useState("")
   const [savingNote, setSavingNote] = useState(false)
+  const [savingStatus, setSavingStatus] = useState(false)
 
   useEffect(() => {
     let alive = true
+
     async function run() {
       if (!Number.isFinite(reviewId)) {
         setErr("Invalid incident id")
         setLoading(false)
         return
       }
+
       setLoading(true)
       setErr(null)
+
       try {
         const d = await apiGetIncident(reviewId)
         if (!alive) return
+
         setData(d)
         setNote(d?.review_event?.note ?? "")
       } catch (e: any) {
@@ -61,7 +86,9 @@ export default function IncidentDetailPage() {
         setLoading(false)
       }
     }
+
     run()
+
     return () => {
       alive = false
     }
@@ -72,32 +99,42 @@ export default function IncidentDetailPage() {
 
   const status: ReviewStatus | null = review?.status ?? null
   const generatedPolicyId = review?.generated_policy_id ?? null
+  const aiScore = getAiScoreSafe(log)
 
   const canSetInProgress = status === "OPEN"
   const canClose = status === "OPEN" || status === "IN_PROGRESS"
 
+  async function refreshIncident(targetReviewId: number) {
+    const refreshed = await apiGetIncident(targetReviewId)
+    setData(refreshed)
+    setNote(refreshed.review_event?.note ?? "")
+  }
+
   async function patchStatus(next: ReviewStatus) {
     if (!review) return
+
+    setSavingStatus(true)
     setErr(null)
+
     try {
       await apiPatchIncident(review.review_id, { status: next })
-      const refreshed = await apiGetIncident(review.review_id)
-      setData(refreshed)
-      setNote(refreshed.review_event.note ?? "")
+      await refreshIncident(review.review_id)
     } catch (e: any) {
       setErr(e?.message ?? "Failed to update incident")
+    } finally {
+      setSavingStatus(false)
     }
   }
 
   async function saveNote() {
     if (!review) return
+
     setSavingNote(true)
     setErr(null)
+
     try {
       await apiPatchIncident(review.review_id, { note })
-      const refreshed = await apiGetIncident(review.review_id)
-      setData(refreshed)
-      setNote(refreshed.review_event.note ?? "")
+      await refreshIncident(review.review_id)
     } catch (e: any) {
       setErr(e?.message ?? "Failed to save note")
     } finally {
@@ -107,8 +144,9 @@ export default function IncidentDetailPage() {
 
   const headerRight = useMemo(() => {
     if (!review) return null
+
     return (
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <Badge variant="outline" className="text-[11px]">
           Incident #{review.review_id}
         </Badge>
@@ -118,9 +156,9 @@ export default function IncidentDetailPage() {
           variant="outline"
           className="h-8 text-xs"
           onClick={() => patchStatus("IN_PROGRESS")}
-          disabled={!canSetInProgress}
+          disabled={!canSetInProgress || savingStatus}
         >
-          Set In Progress
+          {savingStatus && canSetInProgress ? "Updating..." : "Set In Progress"}
         </Button>
 
         <Button
@@ -128,21 +166,22 @@ export default function IncidentDetailPage() {
           variant="outline"
           className="h-8 text-xs"
           onClick={() => patchStatus("CLOSED")}
-          disabled={!canClose}
+          disabled={!canClose || savingStatus}
         >
-          Close
+          {savingStatus && canClose ? "Updating..." : "Close"}
         </Button>
 
         {generatedPolicyId ? (
           <Link href={`/policies/${generatedPolicyId}`}>
             <Button size="sm" className="h-8 text-xs">
-              Policy #{generatedPolicyId} <ExternalLink className="ml-1 size-3" />
+              Policy #{generatedPolicyId}
+              <ExternalLink className="ml-1 size-3" />
             </Button>
           </Link>
         ) : null}
       </div>
     )
-  }, [review, canSetInProgress, canClose, generatedPolicyId])
+  }, [review, canSetInProgress, canClose, generatedPolicyId, savingStatus])
 
   if (loading) {
     return (
@@ -159,9 +198,13 @@ export default function IncidentDetailPage() {
         <p className="text-muted-foreground">{err ?? "Incident not found"}</p>
         <div className="flex gap-2">
           <Link href="/incidents">
-            <Button variant="outline" size="sm">Back to Incidents</Button>
+            <Button variant="outline" size="sm">
+              Back to Incidents
+            </Button>
           </Link>
-          <Button variant="outline" size="sm" onClick={() => router.refresh()}>Refresh</Button>
+          <Button variant="outline" size="sm" onClick={() => router.refresh()}>
+            Refresh
+          </Button>
         </div>
       </div>
     )
@@ -171,21 +214,28 @@ export default function IncidentDetailPage() {
     <div className="flex flex-col gap-4">
       <Breadcrumb>
         <BreadcrumbList>
-          <BreadcrumbItem><BreadcrumbLink href="/dashboard">Dashboard</BreadcrumbLink></BreadcrumbItem>
+          <BreadcrumbItem>
+            <BreadcrumbLink href="/dashboard">Dashboard</BreadcrumbLink>
+          </BreadcrumbItem>
           <BreadcrumbSeparator />
-          <BreadcrumbItem><BreadcrumbLink href="/incidents">Incidents</BreadcrumbLink></BreadcrumbItem>
+          <BreadcrumbItem>
+            <BreadcrumbLink href="/incidents">Incidents</BreadcrumbLink>
+          </BreadcrumbItem>
           <BreadcrumbSeparator />
-          <BreadcrumbItem><BreadcrumbPage>{review.review_id}</BreadcrumbPage></BreadcrumbItem>
+          <BreadcrumbItem>
+            <BreadcrumbPage>{review.review_id}</BreadcrumbPage>
+          </BreadcrumbItem>
         </BreadcrumbList>
       </Breadcrumb>
 
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex items-center gap-3">
           <Link href="/incidents">
             <Button variant="ghost" size="sm" className="h-8 px-2">
               <ArrowLeft className="size-4" />
             </Button>
           </Link>
+
           <div>
             <div className="flex items-center gap-2">
               <h1 className="text-xl font-semibold text-foreground">Incident Detail</h1>
@@ -194,6 +244,7 @@ export default function IncidentDetailPage() {
             <p className="font-mono text-xs text-muted-foreground">{review.review_id}</p>
           </div>
         </div>
+
         {headerRight}
       </div>
 
@@ -207,46 +258,72 @@ export default function IncidentDetailPage() {
         <div className="flex flex-col gap-4 lg:col-span-2">
           <Card className="border shadow-sm">
             <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-semibold text-foreground">Incident Summary</CardTitle>
+              <CardTitle className="text-sm font-semibold text-foreground">
+                Incident Summary
+              </CardTitle>
             </CardHeader>
+
             <CardContent>
-              <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm md:grid-cols-3">
-                <div>
-                  <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Created</dt>
+              <dl className="grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-2 xl:grid-cols-3">
+                <div className="min-w-0">
+                  <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                    Created
+                  </dt>
                   <dd className="mt-0.5 text-xs text-foreground">{fmt(review.created_at)}</dd>
                 </div>
-                <div>
-                  <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Reviewed At</dt>
+
+                <div className="min-w-0">
+                  <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                    Reviewed At
+                  </dt>
                   <dd className="mt-0.5 text-xs text-foreground">{fmt(review.reviewed_at)}</dd>
                 </div>
-                <div>
-                  <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Proposed Action</dt>
-                  <dd className="mt-0.5 text-xs font-medium text-foreground">{review.proposed_action ?? "N/A"}</dd>
+
+                <div className="min-w-0">
+                  <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                    Proposed Action
+                  </dt>
+                  <dd className="mt-0.5 text-xs font-medium text-foreground">
+                    {review.proposed_action ?? "N/A"}
+                  </dd>
                 </div>
-                <div>
-                  <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Reviewer</dt>
-                  <dd className="mt-0.5 text-xs text-foreground">{review.reviewer_id ?? "Unassigned"}</dd>
+
+                <div className="min-w-0">
+                  <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                    Reviewer
+                  </dt>
+                  <dd className="mt-0.5 text-xs text-foreground">
+                    {review.reviewer_id ?? "Unassigned"}
+                  </dd>
                 </div>
-                <div>
-                  <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Log ID</dt>
+
+                <div className="min-w-0">
+                  <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                    Log ID
+                  </dt>
                   <dd className="mt-0.5">
                     <Link
                       href={`/logs/${review.log_id}`}
-                      className="text-xs font-mono text-primary hover:underline inline-flex items-center gap-1"
+                      className="inline-flex items-center gap-1 text-xs font-mono text-primary hover:underline"
                     >
-                      {review.log_id} <ExternalLink className="size-3" />
+                      {review.log_id}
+                      <ExternalLink className="size-3" />
                     </Link>
                   </dd>
                 </div>
+
                 {review.generated_policy_id ? (
-                  <div>
-                    <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Generated Policy</dt>
+                  <div className="min-w-0">
+                    <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                      Generated Policy
+                    </dt>
                     <dd className="mt-0.5">
                       <Link
                         href={`/policies/${review.generated_policy_id}`}
-                        className="text-xs font-mono text-primary hover:underline inline-flex items-center gap-1"
+                        className="inline-flex items-center gap-1 text-xs font-mono text-primary hover:underline"
                       >
-                        {review.generated_policy_id} <ExternalLink className="size-3" />
+                        {review.generated_policy_id}
+                        <ExternalLink className="size-3" />
                       </Link>
                     </dd>
                   </div>
@@ -255,8 +332,12 @@ export default function IncidentDetailPage() {
 
               {review.note ? (
                 <div className="mt-4 rounded-md bg-muted p-3">
-                  <p className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider mb-1">Note</p>
-                  <p className="text-xs text-foreground">{review.note}</p>
+                  <p className="mb-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                    Note
+                  </p>
+                  <p className="whitespace-pre-wrap break-words text-xs text-foreground">
+                    {review.note}
+                  </p>
                 </div>
               ) : null}
             </CardContent>
@@ -264,30 +345,90 @@ export default function IncidentDetailPage() {
 
           <Card className="border shadow-sm">
             <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-semibold text-foreground">Linked Log Summary</CardTitle>
+              <CardTitle className="text-sm font-semibold text-foreground">
+                Linked Log Summary
+              </CardTitle>
             </CardHeader>
+
             <CardContent>
               {log ? (
-                <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm md:grid-cols-4">
-                  <div>
-                    <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Host</dt>
-                    <dd className="mt-0.5 text-xs font-mono text-foreground">{log.host ?? "N/A"}</dd>
+                <dl className="grid grid-cols-1 gap-x-6 gap-y-3 text-sm md:grid-cols-2">
+                  <div className="min-w-0">
+                    <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                      Host
+                    </dt>
+                    <dd
+                      className="mt-0.5 truncate text-xs font-mono text-foreground"
+                      title={log.host ?? "N/A"}
+                    >
+                      {log.host ?? "N/A"}
+                    </dd>
                   </div>
-                  <div>
-                    <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Path</dt>
-                    <dd className="mt-0.5 text-xs font-mono text-foreground">{log.path ?? "N/A"}</dd>
+
+                  <div className="min-w-0">
+                    <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                      Decision
+                    </dt>
+                    <dd className="mt-0.5">
+                      <StatusChip value={log.decision} />
+                    </dd>
                   </div>
-                  <div>
-                    <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Decision</dt>
-                    <dd className="mt-0.5"><StatusChip value={log.decision} /></dd>
+
+                  <div className="min-w-0 md:col-span-2">
+                    <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                      Path
+                    </dt>
+                    <dd
+                      className="mt-0.5 truncate text-xs font-mono text-foreground"
+                      title={log.path ?? "N/A"}
+                    >
+                      {log.path ?? "N/A"}
+                    </dd>
                   </div>
-                  <div>
-                    <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Stage</dt>
-                    <dd className="mt-0.5"><StatusChip value={log.decision_stage} type="stage" /></dd>
+
+                  <div className="min-w-0">
+                    <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                      Stage
+                    </dt>
+                    <dd className="mt-0.5">
+                      <StatusChip value={log.decision_stage} type="stage" />
+                    </dd>
+                  </div>
+
+                  <div className="min-w-0">
+                    <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                      Client IP
+                    </dt>
+                    <dd
+                      className="mt-0.5 truncate text-xs font-mono text-foreground"
+                      title={log.client_ip ?? "N/A"}
+                    >
+                      {log.client_ip ?? "N/A"}
+                    </dd>
+                  </div>
+
+                  <div className="min-w-0">
+                    <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                      Method
+                    </dt>
+                    <dd className="mt-0.5 text-xs font-mono text-foreground">
+                      {log.method ?? "N/A"}
+                    </dd>
+                  </div>
+
+                  <div className="min-w-0">
+                    <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                      AI Score
+                    </dt>
+                    <dd className="mt-0.5 text-xs font-mono text-foreground">
+                      {aiScore}
+                    </dd>
                   </div>
                 </dl>
               ) : (
-                <p className="text-xs text-muted-foreground">No linked log payload from backend</p>
+                <p className="text-xs text-muted-foreground">
+                  No linked log payload from backend
+                </p>
               )}
             </CardContent>
           </Card>
@@ -296,17 +437,79 @@ export default function IncidentDetailPage() {
         <div className="flex flex-col gap-4">
           <Card className="border shadow-sm">
             <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-semibold text-foreground">Add Note</CardTitle>
+              <CardTitle className="text-sm font-semibold text-foreground">
+                Add Note
+              </CardTitle>
             </CardHeader>
+
             <CardContent className="flex flex-col gap-2">
               <Textarea
                 placeholder="Add investigation notes..."
                 value={note}
                 onChange={e => setNote(e.target.value)}
-                className="min-h-[80px] text-xs resize-none"
+                className="min-h-[100px] resize-none text-xs"
               />
-              <Button size="sm" className="h-8 text-xs" disabled={savingNote || !note.trim()} onClick={saveNote}>
+
+              <Button
+                size="sm"
+                className="h-8 text-xs"
+                disabled={savingNote || !note.trim()}
+                onClick={saveNote}
+              >
                 {savingNote ? "Saving..." : "Save Note"}
+              </Button>
+            </CardContent>
+          </Card>
+
+          <Card className="border shadow-sm">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-semibold text-foreground">
+                Quick Actions
+              </CardTitle>
+            </CardHeader>
+
+            <CardContent className="flex flex-col gap-2">
+              <Link href={`/logs/${review.log_id}`}>
+                <Button variant="outline" size="sm" className="h-8 w-full justify-between text-xs">
+                  View Raw Log
+                  <ExternalLink className="size-3" />
+                </Button>
+              </Link>
+
+              {generatedPolicyId ? (
+                <Link href={`/policies/${generatedPolicyId}`}>
+                  <Button size="sm" className="h-8 w-full justify-between text-xs">
+                    Open Linked Policy
+                    <ExternalLink className="size-3" />
+                  </Button>
+                </Link>
+              ) : (
+                <Button size="sm" variant="outline" className="h-8 w-full justify-between text-xs" disabled>
+                  Policy Not Generated
+                  <ExternalLink className="size-3" />
+                </Button>
+              )}
+
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 w-full justify-between text-xs"
+                onClick={() => patchStatus("IN_PROGRESS")}
+                disabled={!canSetInProgress || savingStatus}
+              >
+                {savingStatus && canSetInProgress ? "Updating..." : "Mark In Progress"}
+                <ExternalLink className="size-3 opacity-0" />
+              </Button>
+
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 w-full justify-between text-xs"
+                onClick={() => patchStatus("CLOSED")}
+                disabled={!canClose || savingStatus}
+              >
+                {savingStatus && canClose ? "Updating..." : "Close Incident"}
+                <ExternalLink className="size-3 opacity-0" />
               </Button>
             </CardContent>
           </Card>
