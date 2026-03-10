@@ -1,7 +1,9 @@
 #include "db_function.h"
 #include "url_classification_client.h"
 
+#include <stdio.h>
 #include <string.h>
+#include <mysql/mysql.h>
 
 /*
  * MariaDB 10.3 / MySQL 헤더 조합에서 my_bool 유무가 갈릴 수 있음.
@@ -288,4 +290,104 @@ int insert_ai_analysis_auto_seq(
 
     mysql_stmt_close(stmt);
     return 0;
+}
+int insert_review_event_if_needed(
+    MYSQL* conn,
+    long long log_id,
+    const char* decision_stage
+)
+{
+    MYSQL_STMT* stmt = NULL;
+    const char* sql =
+        "INSERT INTO review_event ("
+        "log_id, status, proposed_action, reviewer_id, reviewed_at, created_at, note, generated_policy_id"
+        ") "
+        "SELECT "
+        "?, 'OPEN', ?, NULL, NULL, NOW(), ?, NULL "
+        "FROM DUAL "
+        "WHERE NOT EXISTS ("
+        "  SELECT 1 "
+        "  FROM review_event "
+        "  WHERE log_id = ? "
+        "    AND status IN ('OPEN', 'IN_PROGRESS')"
+        ")";
+
+    MYSQL_BIND b[4];
+    char proposed_action[32];
+    char note[255];
+    unsigned long proposed_len = 0;
+    unsigned long note_len = 0;
+
+    if (!conn || log_id <= 0) return -1;
+
+    memset(proposed_action, 0, sizeof(proposed_action));
+    memset(note, 0, sizeof(note));
+    memset(b, 0, sizeof(b));
+
+    if (decision_stage && strcmp(decision_stage, "AI_STAGE") == 0)
+        snprintf(proposed_action, sizeof(proposed_action), "%s", "CREATE_POLICY");
+    else
+        snprintf(proposed_action, sizeof(proposed_action), "%s", "NO_ACTION");
+
+    if (decision_stage && decision_stage[0] != '\0')
+        snprintf(note, sizeof(note), "auto-created from BLOCK event (%s)", decision_stage);
+    else
+        snprintf(note, sizeof(note), "auto-created from BLOCK event");
+
+    proposed_len = (unsigned long)strlen(proposed_action);
+    note_len = (unsigned long)strlen(note);
+
+    stmt = mysql_stmt_init(conn);
+    if (!stmt) {
+        fprintf(stderr, "[DB] mysql_stmt_init failed for review_event insert\n");
+        return -1;
+    }
+
+    if (mysql_stmt_prepare(stmt, sql, (unsigned long)strlen(sql)) != 0) {
+        fprintf(stderr, "[DB] mysql_stmt_prepare failed: %s\n", mysql_stmt_error(stmt));
+        mysql_stmt_close(stmt);
+        return -1;
+    }
+
+    b[0].buffer_type = MYSQL_TYPE_LONGLONG;
+    b[0].buffer = &log_id;
+
+    b[1].buffer_type = MYSQL_TYPE_STRING;
+    b[1].buffer = proposed_action;
+    b[1].buffer_length = sizeof(proposed_action);
+    b[1].length = &proposed_len;
+
+    b[2].buffer_type = MYSQL_TYPE_STRING;
+    b[2].buffer = note;
+    b[2].buffer_length = sizeof(note);
+    b[2].length = &note_len;
+
+    b[3].buffer_type = MYSQL_TYPE_LONGLONG;
+    b[3].buffer = &log_id;
+
+    if (mysql_stmt_bind_param(stmt, b) != 0) {
+        fprintf(stderr, "[DB] mysql_stmt_bind_param failed: %s\n", mysql_stmt_error(stmt));
+        mysql_stmt_close(stmt);
+        return -1;
+    }
+
+    if (mysql_stmt_execute(stmt) != 0) {
+        fprintf(stderr, "[DB] mysql_stmt_execute failed: %s\n", mysql_stmt_error(stmt));
+        mysql_stmt_close(stmt);
+        return -1;
+    }
+
+    {
+        my_ulonglong affected = mysql_stmt_affected_rows(stmt);
+        mysql_stmt_close(stmt);
+
+        if (affected > 0) {
+            printf("[REVIEW_EVENT] created for log_id=%lld stage=%s\n",
+                   log_id,
+                   decision_stage ? decision_stage : "UNKNOWN");
+            return 1;
+        }
+
+        return 0;
+    }
 }

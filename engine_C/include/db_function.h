@@ -45,6 +45,12 @@ int insert_ai_analysis_auto_seq(
     const char* error_code
 );
 
+int insert_review_event_if_needed(
+    MYSQL* conn,
+    long long log_id,
+    const char* decision_stage
+);
+
 #ifdef __cplusplus
 }
 #endif

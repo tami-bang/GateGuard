@@ -161,11 +161,11 @@ void engine_handle_http_event(const HttpEvent* ev)
     if (d.matched)
     {
         if (d.action == ACT_BLOCK)
-        {
-            update_access_log_decision(g_conn, log_id, "BLOCK", "POLICY", "POLICY_STAGE", d.policy_id);
-            http_response_inject(ev, g_conn, log_id, d.block_status_code);
-            return;
-        }
+		{
+ 		    update_access_log_decision(g_conn, log_id, "BLOCK", "POLICY", "POLICY_STAGE", d.policy_id);
+   		    (void)insert_review_event_if_needed(g_conn, log_id, "POLICY_STAGE");
+   		    http_response_inject(ev, g_conn, log_id, d.block_status_code);
+		}
 
         if (d.action == ACT_ALLOW)
         {
@@ -215,6 +215,7 @@ void engine_handle_http_event(const HttpEvent* ev)
     if (final == ACT_BLOCK)
     {
         update_access_log_decision(g_conn, log_id, "BLOCK", "AI", "AI_STAGE", 0);
+		(void)insert_review_event_if_needed(g_conn, log_id, "AI_STAGE");
         http_response_inject(ev, g_conn, log_id, 403);
     }
     else if (final == ACT_ALLOW)
