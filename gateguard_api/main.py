@@ -11,6 +11,9 @@ from fastapi import FastAPI, Header, HTTPException, Query, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from gateguard_api.ai_loader import load_artifacts_on_startup, get_model_version
+from gateguard_api.ai_manager import score_url
+
 def load_env(path: str) -> None:
     if not os.path.exists(path):
         return
@@ -41,6 +44,10 @@ MODEL_VERSION = os.getenv("MODEL_VERSION", "urlclf-unknown")
 THRESHOLD = float(os.getenv("THRESHOLD", "0.50"))
 
 app = FastAPI(title="GateGuard AI Scoring API")
+
+@app.on_event("startup")
+def startup_event() -> None:
+    load_artifacts_on_startup()
 
 # --- CORS (Admin UI에서 FastAPI 호출 허용) ---
 def _parse_csv(v: Optional[str]) -> List[str]:
@@ -1432,7 +1439,11 @@ class ScoreResponse(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "gateguard-ai-api", "model_version": MODEL_VERSION}
+    return {
+        "status": "ok", 
+        "service": "gateguard-ai-api", 
+        "model_version": get_model_version(),
+        }
 
 
 def require_token(authorization: Optional[str]) -> None:
@@ -1444,19 +1455,57 @@ def require_token(authorization: Optional[str]) -> None:
     if token != API_TOKEN:
         raise HTTPException(status_code=403, detail="Invalid token")
 
+@app.post("/v1/score", response_model=ScoreResponse)
+def score(req: ScoreRequest, authorization: Optional[str] = Header(default=None)):
+    """
+    운영 API 호환 유지:
+    - Authorization Bearer 토큰 검사 유지
+    - 응답 스키마(request_id, model_version, score, label, threshold, latency_ms) 유지
+    - 실제 추론은 ai_manager.score_url() 사용
+    """
+    require_token(authorization)
 
-def simple_score(host: str, path: Optional[str]) -> float:
-    s = host + (path or "")
-    digit_cnt = sum(ch.isdigit() for ch in s)
-    special_cnt = sum((not ch.isalnum()) for ch in s)
+    start = time.time()
 
-    base = 0.10
-    base += min(digit_cnt * 0.03, 0.40)
-    base += min(special_cnt * 0.02, 0.30)
-    if path:
-        base += min(len(path) / 200.0, 0.20)
-    return max(0.0, min(1.0, base))
+    h = (req.host or "").lower()
+    p = (req.path or "").lower()
 
+    # 기존 엔진 테스트 훅 유지
+    if "timeout_test" in h or "timeout_test" in p:
+        time.sleep(10)
+
+    if "error_test" in h or "error_test" in p:
+        raise HTTPException(status_code=500, detail="forced 500 for engine test")
+
+    if "invalid_test" in h or "invalid_test" in p:
+        return Response(
+            content='{"request_id": "' + req.request_id + '", "score": 0.1, "label": ',
+            media_type="application/json",
+            status_code=200,
+        )
+
+    try:
+        result = score_url(
+            request_id=req.request_id,
+            log_id=None,   # 현재 엔진 SSOT 정책 유지: 엔진이 ai_analysis 기록
+            host=req.host,
+            path=req.path or "/",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"AI scoring failed: {exc}") from exc
+
+    latency_ms = int((time.time() - start) * 1000)
+
+    return ScoreResponse(
+        request_id=req.request_id,
+        model_version=result["model_version"],
+        score=round(float(result["score"]), 4),
+        label=result["label"],
+        threshold=float(THRESHOLD),
+        latency_ms=int(latency_ms),
+    )
 
 def label_from_score(score: float, threshold: float) -> str:
     return "malicious" if score >= threshold else "benign"
@@ -1674,17 +1723,23 @@ def system_health():
     fastapi = check_service("gateguard-fastapi")
     mariadb = check_service("mariadb")
 
-    model_path = "/home/ktech/GateGuard/ml/model.pkl"
+    model_dir = os.getenv(
+        "MODEL_DIR",
+        "/home/ktech/GateGuard/ai_trainer/artifacts/latest"
+    )
+    model_file = os.path.join(model_dir, "model.pkl")
+    meta_file = os.path.join(model_dir, "meta.json")
 
-    ai_model = "loaded" if os.path.exists(model_path) else "missing"
+    ai_model = "loaded" if os.path.exists(model_file) and os.path.exists(meta_file) else "missing"
 
     return {
         "engine": engine,
         "fastapi": fastapi,
         "mariadb": mariadb,
-        "ai_model": ai_model
+        "ai_model": ai_model,
+        "model_version": get_model_version() if ai_model == "loaded" else None,
     }
- 
+
 @app.post("/v1/score", response_model=ScoreResponse)
 def score(req: ScoreRequest, authorization: Optional[str] = Header(default=None)):
     """
