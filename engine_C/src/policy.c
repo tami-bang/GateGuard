@@ -197,7 +197,7 @@ int load_policy_cache(policy_cache_t* cache,
         "       risk_level, category, block_status_code, redirect_url "
         "FROM policy "
         "WHERE is_enabled=1 "
-        "ORDER BY priority DESC, policy_id ASC";
+        "ORDER BY priority ASC, policy_id ASC";
 
     if (mysql_query(conn, q1) != 0) {
         fprintf(stderr, "[POLICY_DB] query policy failed: %s\n", mysql_error(conn));

@@ -179,7 +179,8 @@ static void on_packet(u_char* user,
     HttpEvent ev;
     memset(&ev, 0, sizeof(ev));
 
-    ev.is_http = 1;
+    ev.detect_ts_ms = (int64_t)hdr->ts.tv_sec * 1000 + (int64_t)hdr->ts.tv_usec / 1000;
+	ev.is_http = 1;
 
     if (!parse_http_host_path_method(payload,
                                      (size_t)payload_len,

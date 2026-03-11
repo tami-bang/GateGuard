@@ -9,12 +9,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include <uuid/uuid.h>
 #include <mysql/mysql.h>
 
-/* =========================
- * runtime config helpers
- * ========================= */
+// runtime config helpers
 static const char* get_env_str(const char* key, const char* def)
 {
     const char* v = getenv(key);
@@ -44,6 +43,23 @@ static double get_env_double(const char* key, double def)
     return n;
 }
 
+static int64_t now_ms(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (int64_t)tv.tv_sec * 1000 + (int64_t)tv.tv_usec / 1000;
+}
+
+static int calc_engine_latency_ms(const HttpEvent* ev)
+{
+    if (!ev || ev->detect_ts_ms <= 0) return -1;
+
+    int64_t cur = now_ms();
+    if (cur < ev->detect_ts_ms) return 0;
+
+    return (int)(cur - ev->detect_ts_ms);
+}
+
 static void build_score_endpoint(char* out, size_t outsz)
 {
     const char* base = get_env_str("AI_BASE_URL", "http://127.0.0.1:8000");
@@ -56,15 +72,11 @@ static void build_score_endpoint(char* out, size_t outsz)
         snprintf(out, outsz, "%s/v1/score", base);
 }
 
-/* =========================
- * globals
- * ========================= */
+ // globals
 static MYSQL* g_conn = NULL;
 static policy_cache_t g_cache;
 
-/* =========================
- * DB 연결
- * ========================= */
+ // DB 연결
 static MYSQL* db_connect(void)
 {
     const char* db_host = get_env_str("DB_HOST", "127.0.0.1");
@@ -130,9 +142,7 @@ static const char* ai_error_to_code(const ai_result_t* ar, char* out, size_t out
     return out;
 }
 
-/* =========================
- * 핵심 엔진 처
- * ========================= */
+ // 핵심 엔진 처
 void engine_handle_http_event(const HttpEvent* ev)
 {
     if (!ev || !ev->is_http) return;
@@ -145,10 +155,15 @@ void engine_handle_http_event(const HttpEvent* ev)
 
     long long log_id =
         insert_access_log(g_conn,
-                          request_id,
+						  request_id,
                           ev->meta.client_ip,
-                          ev->host,
-                          ev->path);
+                      	  (int)ev->meta.client_port,
+                          ev->meta.server_ip,
+						  (int)ev->meta.server_port,
+						  ev->host,
+						  ev->path,
+						  ev->method,
+						  ev->url_norm);
 
     if (log_id < 0) return;
 
@@ -162,26 +177,26 @@ void engine_handle_http_event(const HttpEvent* ev)
     {
         if (d.action == ACT_BLOCK)
 		{
- 		    update_access_log_decision(g_conn, log_id, "BLOCK", "POLICY", "POLICY_STAGE", d.policy_id);
+ 		    update_access_log_decision(g_conn, log_id, "BLOCK", "POLICY", "POLICY_STAGE", d.policy_id, calc_engine_latency_ms(ev));
    		    (void)insert_review_event_if_needed(g_conn, log_id, "POLICY_STAGE");
    		    http_response_inject(ev, g_conn, log_id, d.block_status_code);
 		}
 
         if (d.action == ACT_ALLOW)
         {
-            update_access_log_decision(g_conn, log_id, "ALLOW", "POLICY", "POLICY_STAGE", d.policy_id);
+            update_access_log_decision(g_conn, log_id, "ALLOW", "POLICY", "POLICY_STAGE", d.policy_id, calc_engine_latency_ms(ev));
             return;
         }
 
         if (d.action == ACT_REDIRECT)
         {
-            update_access_log_decision(g_conn, log_id, "REVIEW", "POLICY", "POLICY_STAGE", d.policy_id);
+            update_access_log_decision(g_conn, log_id, "REVIEW", "POLICY", "POLICY_STAGE", d.policy_id, calc_engine_latency_ms(ev));
             return;
         }
 
         if (d.action == ACT_REVIEW)
         {
-            update_access_log_decision(g_conn, log_id, "REVIEW", "POLICY", "POLICY_STAGE", d.policy_id);
+            update_access_log_decision(g_conn, log_id, "REVIEW", "POLICY", "POLICY_STAGE", d.policy_id, calc_engine_latency_ms(ev));
             return;
         }
     }
@@ -205,7 +220,7 @@ void engine_handle_http_event(const HttpEvent* ev)
 
     if (!ok)
     {
-        update_access_log_decision(g_conn, log_id, "REVIEW", "SYSTEM", "FAIL_STAGE", 0);
+        update_access_log_decision(g_conn, log_id, "REVIEW", "SYSTEM", "FAIL_STAGE", 0, calc_engine_latency_ms(ev));
         return;
     }
 
@@ -214,23 +229,21 @@ void engine_handle_http_event(const HttpEvent* ev)
 
     if (final == ACT_BLOCK)
     {
-        update_access_log_decision(g_conn, log_id, "BLOCK", "AI", "AI_STAGE", 0);
+        update_access_log_decision(g_conn, log_id, "BLOCK", "AI", "AI_STAGE", 0, calc_engine_latency_ms(ev));
 		(void)insert_review_event_if_needed(g_conn, log_id, "AI_STAGE");
         http_response_inject(ev, g_conn, log_id, 403);
     }
     else if (final == ACT_ALLOW)
     {
-        update_access_log_decision(g_conn, log_id, "ALLOW", "AI", "AI_STAGE", 0);
+        update_access_log_decision(g_conn, log_id, "ALLOW", "AI", "AI_STAGE", 0, calc_engine_latency_ms(ev));
     }
     else
     {
-        update_access_log_decision(g_conn, log_id, "REVIEW", "AI", "AI_STAGE", 0);
+        update_access_log_decision(g_conn, log_id, "REVIEW", "AI", "AI_STAGE", 0, calc_engine_latency_ms(ev));
     }
 }
 
-/* =========================
- * main
- * ========================= */
+ // main
 int main(int argc, char** argv)
 {
     const char* ifname = get_env_str("CAP_IFACE", "enp0s3");
