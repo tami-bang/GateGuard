@@ -1,27 +1,11 @@
 {
-  "model_version": "20260310124811",
-  "algorithm": "logistic_regression",
-  "feature_columns": [
-    "url_length",
-    "host_length",
-    "path_length",
-    "query_length",
-    "slash_count",
-    "dot_count",
-    "hyphen_count",
-    "underscore_count",
-    "question_mark_count",
-    "ampersand_count",
-    "equal_count",
-    "digit_count",
-    "special_char_count",
-    "suspicious_keyword_hits",
-    "has_suspicious_extension",
-    "has_query",
-    "is_ipv4_host",
-    "subdomain_count"
+  "model_version": "url-threat-v1",
+  "task": "url_classification",
+  "labels": [
+    "benign",
+    "malware",
+    "phishing"
   ],
-  "training_row_count": 5000,
-  "days": 30,
-  "positive_source": "block_only"
+  "algorithm": "logistic_regression",
+  "feature_mode": "tfidf_plus_numeric"
 }

@@ -1,77 +1,94 @@
-# ~/GateGuard/ai_trainer/ai_train_manager.py
-"""
-학습 전체 orchestration
-"""
-
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from sklearn.model_selection import train_test_split
 
-from ai_train_program import build_model, predict, predict_proba, train_model
-from data_preprocessor import build_feature_dataframe
-from db_connector import close_connection, fetch_training_rows, get_connection
+from ai_train_program import (
+    build_model,
+    encode_labels,
+    fit_feature_pipeline,
+    predict,
+    predict_top_score,
+    save_artifacts,
+    train_model,
+    transform_feature_pipeline,
+)
+from data_preprocessor import preprocess_csv_files
 from evaluator import evaluate_classification
-from extract_to_file import build_meta, save_meta, save_metrics, save_model
+
+
+def get_training_csv_paths(config: Dict[str, Any]) -> List[str]:
+    data_config = config.get("data", {})
+    csv_paths = data_config.get("csv_paths", [])
+
+    if not csv_paths:
+        raise ValueError("config['data']['csv_paths'] is empty")
+
+    if not isinstance(csv_paths, list):
+        raise ValueError("config['data']['csv_paths'] must be a list")
+
+    normalized_paths = []
+    for path in csv_paths:
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError("Each csv path must be a non-empty string")
+        normalized_paths.append(path.strip())
+
+    return normalized_paths
 
 
 def run_training_pipeline(config: Dict[str, Any]) -> Dict[str, Any]:
-    conn = None
+    csv_paths = get_training_csv_paths(config)
 
-    try:
-        conn = get_connection(config["db"])
+    dataset = preprocess_csv_files(csv_paths)
 
-        rows = fetch_training_rows(
-            conn=conn,
-            days=config["training"]["days"],
-            limit=config["training"]["limit"],
-            positive_source=config["training"]["positive_source"],
-        )
+    if dataset.dataframe.empty:
+        raise ValueError("No rows found after preprocessing CSV files")
 
-        if not rows:
-            raise ValueError("No training rows fetched from database")
+    if dataset.labels.empty:
+        raise ValueError("No labels found after preprocessing CSV files")
 
-        dataset = build_feature_dataframe(rows)
+    x_train_df, x_valid_df, y_train, y_valid = train_test_split(
+        dataset.dataframe,
+        dataset.labels,
+        test_size=config["training"]["test_size"],
+        random_state=config["training"]["random_state"],
+        stratify=dataset.labels,
+    )
 
-        x_train, x_valid, y_train, y_valid = train_test_split(
-            dataset.dataframe,
-            dataset.labels,
-            test_size=config["training"]["test_size"],
-            random_state=config["training"]["random_state"],
-            stratify=dataset.labels,
-        )
+    vectorizer, x_train = fit_feature_pipeline(x_train_df, config)
+    x_valid = transform_feature_pipeline(x_valid_df, vectorizer)
 
-        model = build_model(config)
-        trained_model = train_model(model, x_train, y_train)
+    label_encoder, y_train_enc, y_valid_enc = encode_labels(y_train, y_valid)
 
-        y_pred = predict(trained_model, x_valid)
-        y_score = predict_proba(trained_model, x_valid)
+    model = build_model(config)
+    trained_model = train_model(model, x_train, y_train_enc)
 
-        metrics = evaluate_classification(y_valid, y_pred, y_score)
+    y_pred_enc = predict(trained_model, x_valid)
+    y_score = predict_top_score(trained_model, x_valid)
 
-        output_dir = config["output"]["output_dir"]
-        model_path = save_model(trained_model, output_dir)
+    y_pred = label_encoder.inverse_transform(y_pred_enc)
+    y_valid_labels = label_encoder.inverse_transform(y_valid_enc)
 
-        meta = build_meta(
-            config=config,
-            feature_columns=dataset.feature_columns,
-            training_row_count=len(rows),
-        )
-        meta_path = save_meta(meta, output_dir)
-        metrics_path = save_metrics(metrics, output_dir)
+    metrics = evaluate_classification(y_valid_labels, y_pred, y_score)
 
-        return {
-            "status": "success",
-            "row_count": len(rows),
-            "feature_count": len(dataset.feature_columns),
-            "artifacts": {
-                "model_path": model_path,
-                "meta_path": meta_path,
-                "metrics_path": metrics_path,
-            },
-            "metrics": metrics,
-        }
+    output_dir = config["output"]["output_dir"]
+    save_artifacts(
+        model=trained_model,
+        vectorizer=vectorizer,
+        label_encoder=label_encoder,
+        config=config,
+        metrics=metrics,
+        output_dir=output_dir,
+    )
 
-    finally:
-        close_connection(conn)
+    return {
+        "status": "success",
+        "row_count": len(dataset.dataframe),
+        "feature_count": len(dataset.feature_columns),
+        "labels": sorted(dataset.labels.unique().tolist()),
+        "artifacts": {
+            "output_dir": output_dir,
+        },
+        "metrics": metrics,
+    }
