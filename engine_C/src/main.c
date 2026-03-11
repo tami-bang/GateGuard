@@ -1,3 +1,4 @@
+// engine_C/src/main.c
 #include "policy.h"
 #include "packet_manager.h"
 #include "http_response_injector.h"
@@ -9,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/time.h>
 #include <uuid/uuid.h>
 #include <mysql/mysql.h>
@@ -72,11 +74,77 @@ static void build_score_endpoint(char* out, size_t outsz)
         snprintf(out, outsz, "%s/v1/score", base);
 }
 
- // globals
+/* -------------------------
+ * 내부/관리 UI 노이즈 필터
+ * - source IP는 필터 기준이 아님
+ * - host/path 성격으로 필터링
+ * ------------------------- */
+static int starts_with_path(const char* path, const char* prefix)
+{
+    if (!path || !prefix) return 0;
+    size_t n = strlen(prefix);
+    return strncmp(path, prefix, n) == 0;
+}
+
+static int is_internal_admin_host(const char* host)
+{
+    if (!host || !host[0]) return 0;
+
+    return (
+        strcasecmp(host, "192.168.1.24:8080") == 0 ||
+        strcasecmp(host, "localhost:8080") == 0 ||
+        strcasecmp(host, "127.0.0.1:8080") == 0
+    );
+}
+
+static int is_internal_admin_path(const char* path)
+{
+    if (!path || !path[0]) return 0;
+
+    return (
+        starts_with_path(path, "/dashboard")   ||
+        starts_with_path(path, "/logs")        ||
+        starts_with_path(path, "/policies")    ||
+        starts_with_path(path, "/incidents")   ||
+        starts_with_path(path, "/ai-analysis") ||
+        starts_with_path(path, "/audit-log")   ||
+        starts_with_path(path, "/settings")    ||
+        starts_with_path(path, "/login")       ||
+        starts_with_path(path, "/sign-up")
+    );
+}
+
+static int is_next_internal_request(const char* path)
+{
+    if (!path || !path[0]) return 0;
+
+    if (strstr(path, "?_rsc=") != NULL) return 1;
+    if (strstr(path, "/_next/") != NULL) return 1;
+
+    return 0;
+}
+
+static int should_skip_noise_event(const HttpEvent* ev)
+{
+    if (!ev) return 1;
+
+    // Next.js 내부 요청은 별도 제외
+    if (is_next_internal_request(ev->path)) {
+        return 1;
+    }
+
+    // 관리자 UI host + 관리자 UI path 조합만 제외
+    if (is_internal_admin_host(ev->host) && is_internal_admin_path(ev->path)) {
+        return 1;
+    }
+
+    return 0;
+}
+// globals
 static MYSQL* g_conn = NULL;
 static policy_cache_t g_cache;
 
- // DB 연결
+// DB 연결
 static MYSQL* db_connect(void)
 {
     const char* db_host = get_env_str("DB_HOST", "127.0.0.1");
@@ -142,10 +210,15 @@ static const char* ai_error_to_code(const ai_result_t* ar, char* out, size_t out
     return out;
 }
 
- // 핵심 엔진 처
+// 핵심 엔진 처리
 void engine_handle_http_event(const HttpEvent* ev)
 {
     if (!ev || !ev->is_http) return;
+
+    /* 관리 UI / 내부 요청 노이즈는 여기서 조기 제외 */
+    if (should_skip_noise_event(ev)) {
+        return;
+    }
 
     uuid_t uuid;
     uuid_generate(uuid);
@@ -155,15 +228,15 @@ void engine_handle_http_event(const HttpEvent* ev)
 
     long long log_id =
         insert_access_log(g_conn,
-						  request_id,
+                          request_id,
                           ev->meta.client_ip,
-                      	  (int)ev->meta.client_port,
+                          (int)ev->meta.client_port,
                           ev->meta.server_ip,
-						  (int)ev->meta.server_port,
-						  ev->host,
-						  ev->path,
-						  ev->method,
-						  ev->url_norm);
+                          (int)ev->meta.server_port,
+                          ev->host,
+                          ev->path,
+                          ev->method,
+                          ev->url_norm);
 
     if (log_id < 0) return;
 
@@ -176,11 +249,12 @@ void engine_handle_http_event(const HttpEvent* ev)
     if (d.matched)
     {
         if (d.action == ACT_BLOCK)
-		{
- 		    update_access_log_decision(g_conn, log_id, "BLOCK", "POLICY", "POLICY_STAGE", d.policy_id, calc_engine_latency_ms(ev));
-   		    (void)insert_review_event_if_needed(g_conn, log_id, "POLICY_STAGE");
-   		    http_response_inject(ev, g_conn, log_id, d.block_status_code);
-		}
+        {
+            update_access_log_decision(g_conn, log_id, "BLOCK", "POLICY", "POLICY_STAGE", d.policy_id, calc_engine_latency_ms(ev));
+            (void)insert_review_event_if_needed(g_conn, log_id, "POLICY_STAGE");
+            http_response_inject(ev, g_conn, log_id, d.block_status_code);
+            return;
+        }
 
         if (d.action == ACT_ALLOW)
         {
@@ -230,7 +304,7 @@ void engine_handle_http_event(const HttpEvent* ev)
     if (final == ACT_BLOCK)
     {
         update_access_log_decision(g_conn, log_id, "BLOCK", "AI", "AI_STAGE", 0, calc_engine_latency_ms(ev));
-		(void)insert_review_event_if_needed(g_conn, log_id, "AI_STAGE");
+        (void)insert_review_event_if_needed(g_conn, log_id, "AI_STAGE");
         http_response_inject(ev, g_conn, log_id, 403);
     }
     else if (final == ACT_ALLOW)
@@ -243,7 +317,7 @@ void engine_handle_http_event(const HttpEvent* ev)
     }
 }
 
- // main
+// main
 int main(int argc, char** argv)
 {
     const char* ifname = get_env_str("CAP_IFACE", "enp0s3");

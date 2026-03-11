@@ -49,7 +49,7 @@ static int starts_with_method(const unsigned char* p, size_t len)
 
 static int looks_like_http_request(const unsigned char* payload, size_t len)
 {
-	if (!payload || len == 0) return 0;
+    if (!payload || len == 0) return 0;
 
     if (starts_with_method(payload, len))
         return 1;
@@ -65,14 +65,12 @@ static int looks_like_http_request(const unsigned char* payload, size_t len)
 
 static const unsigned char* find_host_header(const unsigned char* payload, size_t payload_len)
 {
-    // 간단하게 Host:, host: 둘 다 허용
     const unsigned char* p = gg_memmem(payload, payload_len, (const unsigned char*)"Host:", 5);
     if (p) return p;
 
     p = gg_memmem(payload, payload_len, (const unsigned char*)"host:", 5);
     if (p) return p;
 
-    // "Host :" 같은 변형도 일부 허용
     p = gg_memmem(payload, payload_len, (const unsigned char*)"Host :", 6);
     if (p) return p;
 
@@ -114,14 +112,12 @@ static int parse_http_host_path_method(const unsigned char* payload,
     snprintf(out_method, method_sz, "%s", method);
     snprintf(out_path,   path_sz,   "%s", path);
 
-    // Host는 없을 수도 있으므로, 없으면 _missing_으로 채워서 이벤트를 계속 흘린다.
     const unsigned char* host_pos = find_host_header(payload, payload_len);
     if (!host_pos) {
         snprintf(out_host, host_sz, "_missing_");
         return 1;
     }
 
-    // Host: 또는 Host : 처리
     if (memcmp(host_pos, "Host :", 6) == 0 || memcmp(host_pos, "host :", 6) == 0) {
         host_pos += 6;
     } else {
@@ -179,8 +175,9 @@ static void on_packet(u_char* user,
     HttpEvent ev;
     memset(&ev, 0, sizeof(ev));
 
+    /* 패킷 캡처 시각을 엔진 latency 계산 기준으로 사용 */
     ev.detect_ts_ms = (int64_t)hdr->ts.tv_sec * 1000 + (int64_t)hdr->ts.tv_usec / 1000;
-	ev.is_http = 1;
+    ev.is_http = 1;
 
     if (!parse_http_host_path_method(payload,
                                      (size_t)payload_len,
@@ -217,7 +214,8 @@ int packet_extractor_run_pcap_loop(const char* ifname)
 {
     char errbuf[PCAP_ERRBUF_SIZE];
 
-    pcap_t* p = pcap_open_live(ifname, 65535, 1, 1000, errbuf);
+    /* timeout 1000ms -> 100ms로 줄여 capture 지연 완화 */
+    pcap_t* p = pcap_open_live(ifname, 65535, 1, 100, errbuf);
     if (!p)
     {
         printf("pcap_open_live failed: %s\n", errbuf);
