@@ -8,19 +8,24 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { StatusChip } from "@/components/status-chip"
+import { cn } from "@/lib/utils"
+
 import {
   Globe,
   ShieldOff,
-  Percent,
   Brain,
   FileText,
-  AlertTriangle,
   ExternalLink,
   Server,
   Database,
   Cpu,
   Activity,
+  ArrowRight,
+  Radar,
+  Target,
+  type LucideIcon,
 } from "lucide-react"
+
 import {
   AreaChart,
   Area,
@@ -28,171 +33,91 @@ import {
   Bar,
   LineChart,
   Line,
+  PieChart,
+  Pie,
+  Cell,
   XAxis,
   YAxis,
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
+  Legend,
 } from "recharts"
 
-type DashboardSummary = {
-  total_requests: number
-  blocked_requests: number
-  block_rate: number
-  ai_enforced_blocks: number
-  policy_enforced_blocks: number
-  open_incidents: number
-}
+import {
+  apiGetDashboardSummary,
+  apiGetSystemHealth,
+  type DashboardResponse,
+  type SystemHealthResponse,
+} from "@/lib/api-client"
 
-type HourRequests = {
-  hour: string
-  requests: number
-}
-
-type HourDecisionSeries = {
-  hour: string
-  allow: number
-  block: number
-  review: number
-}
-
-type CountByHost = {
-  host: string
+/*
+로컬 확장 타입
+- 백엔드가 아직 안 주는 필드는 optional
+*/
+type TopClientIp = {
+  client_ip: string
   count: number
 }
 
-type CountByPath = {
-  path: string
-  count: number
-}
-
-type ScoreBucket = {
-  range: string
-  count: number
-}
-
-type LatencySeries = {
-  hour: string
-  avg_latency: number
-  max_latency: number
-}
-
-type RecentEvent = {
-  log_id: number
-  request_id: string
-  detect_timestamp: string
-  client_ip: string | null
-  client_port: number | null
-  server_ip: string | null
-  server_port: number | null
-  host: string | null
-  path: string | null
-  method: string | null
-  url_norm: string | null
+type DecisionDistributionItem = {
   decision: string
-  reason: string | null
-  decision_stage: string
-  policy_id: number | null
-  user_agent: string | null
-  engine_latency_ms: number | null
-  inject_attempted: number | null
-  inject_send: number | null
-  inject_errno: number | null
-  inject_latency_ms: number | null
-  inject_status_code: number | null
-  ai_score: number | null
-  ai_label: string | null
-  ai_model_version: string | null
-  ai_latency_ms: number | null
-  ai_error_code: string | null
+  count: number
 }
 
-type DashboardResponse = {
-  summary: DashboardSummary
-  requests_over_time: HourRequests[]
-  block_vs_allow_over_time: HourDecisionSeries[]
-  top_hosts: CountByHost[]
-  top_paths: CountByPath[]
-  ai_score_distribution: ScoreBucket[]
-  ai_latency_over_time: LatencySeries[]
-  recent_events: RecentEvent[]
-  last_hours: number
+type PolicyAiCompositionItem = {
+  label: string
+  count: number
 }
 
-type SystemHealthResponse = {
-  engine: string
-  fastapi: string
-  mariadb: string
-  ai_model: string
+type ExtendedSummary = DashboardResponse["summary"] & {
+  ai_block_rate?: number
+  policy_block_rate?: number
 }
+
+type ExtendedDashboardResponse = DashboardResponse & {
+  summary: ExtendedSummary
+  top_client_ips?: TopClientIp[]
+  decision_distribution?: DecisionDistributionItem[]
+  policy_vs_ai_composition?: PolicyAiCompositionItem[]
+}
+
+type RecentEvent = DashboardResponse["recent_events"][number]
 
 type KpiItem = {
   label: string
   value: string
-  icon: typeof Globe
-  color: string
+  rawNumber?: number
+  suffix?: string
+  icon: LucideIcon
   href: string
+  accentClass: string
+  subText: string
+  animateNumber?: boolean
 }
 
 type HealthItem = {
   label: string
   value: string
-  icon: typeof Server
+  icon: LucideIcon
 }
 
-function getBaseUrl(): string {
-  const v = process.env.NEXT_PUBLIC_FASTAPI_BASE_URL
-  if (v && v.trim()) return v.trim().replace(/\/+$/, "")
-
-  if (typeof window !== "undefined") {
-    const proto = window.location.protocol
-    const host = window.location.hostname
-    return `${proto}//${host}:8000`
-  }
-
-  return "http://192.168.1.24:8000"
-}
-
-// 대시보드 요약 조회
-async function fetchDashboardSummary(lastHours: number): Promise<DashboardResponse> {
-  const url = `${getBaseUrl()}/v1/dashboard/summary?last_hours=${lastHours}`
-
-  const res = await fetch(url, {
-    method: "GET",
-    cache: "no-store",
-    credentials: "include",
-    headers: {
-      "Content-Type": "application/json",
-    },
-  })
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => "")
-    throw new Error(`${res.status} ${res.statusText} ${text}`)
-  }
-
-  return (await res.json()) as DashboardResponse
-}
-
-// 시스템 상태 조회
-async function fetchSystemHealth(): Promise<SystemHealthResponse> {
-  const url = `${getBaseUrl()}/v1/system/health`
-
-  const res = await fetch(url, {
-    method: "GET",
-    cache: "no-store",
-    credentials: "include",
-    headers: {
-      "Content-Type": "application/json",
-    },
-  })
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => "")
-    throw new Error(`${res.status} ${res.statusText} ${text}`)
-  }
-
-  return (await res.json()) as SystemHealthResponse
+/*
+GateGuard color system
+*/
+const GG_COLORS = {
+  brand: "#1E3A8A",
+  primary: "#3B82F6",
+  success: "#10B981",
+  warning: "#F59E0B",
+  danger: "#EF4444",
+  ai: "#6366F1",
+  teal: "#14B8A6",
+  border: "#E5E7EB",
+  text: "#111827",
+  textSecondary: "#6B7280",
+  textMuted: "#9CA3AF",
+  bgSubtle: "#F8FAFC",
 }
 
 function formatNumber(v: number | null | undefined): string {
@@ -210,7 +135,6 @@ function formatTimestamp(value: string | null | undefined): string {
   return d.toLocaleString()
 }
 
-// 상태 라벨 변환
 function normalizeHealthLabel(value: string | null | undefined): string {
   const v = String(value || "").toLowerCase()
 
@@ -219,49 +143,170 @@ function normalizeHealthLabel(value: string | null | undefined): string {
   if (v === "failed") return "FAILED"
   if (v === "activating") return "STARTING"
   if (v === "deactivating") return "STOPPING"
-  if (v === "loaded") return "LOADED"
+  if (v === "loaded") return "RUNNING"
   if (v === "missing") return "MISSING"
 
-  return value || "UNKNOWN"
+  return "UNKNOWN"
 }
 
-// 상태 배지 스타일
-function getHealthBadgeClass(value: string | null | undefined): string {
-  const v = String(value || "").toLowerCase()
+const chartTooltipStyle = {
+  fontSize: 12,
+  borderRadius: 10,
+  border: `1px solid ${GG_COLORS.border}`,
+  backgroundColor: "#FFFFFF",
+}
 
-  if (v === "active" || v === "loaded") {
-    return "border-emerald-200 bg-emerald-50 text-emerald-700"
-  }
-  if (v === "inactive" || v === "missing") {
-    return "border-amber-200 bg-amber-50 text-amber-700"
-  }
-  if (v === "failed") {
-    return "border-red-200 bg-red-50 text-red-700"
+function getRecentEventRowClass(log: RecentEvent): string {
+  const decision = String(log.decision || "").toUpperCase()
+  const stage = String(log.decision_stage || "").toUpperCase()
+
+  if (decision === "BLOCK" && stage === "FAIL_STAGE") {
+    return "border-l-2 border-l-red-500 bg-red-50/50 hover:bg-red-50"
   }
 
-  return "border-slate-200 bg-slate-50 text-slate-700"
+  if (decision === "BLOCK") {
+    return "border-l-2 border-l-red-400 bg-red-50/30 hover:bg-red-50/60"
+  }
+
+  if (decision === "REVIEW") {
+    return "border-l-2 border-l-amber-400 bg-amber-50/30 hover:bg-amber-50/50"
+  }
+
+  return "hover:bg-slate-50"
+}
+
+function getKpiAccentClass(label: string): string {
+  if (label === "Blocked Requests") return "from-red-500/90 to-red-400/70"
+  if (label === "AI Block Rate") return "from-indigo-500/90 to-indigo-400/70"
+  if (label === "Policy Block Rate") return "from-blue-600/90 to-blue-400/70"
+  if (label === "Top Attacker IP") return "from-amber-500/90 to-orange-400/70"
+  if (label === "Top Target Host") return "from-teal-500/90 to-teal-400/70"
+  return "from-blue-700/90 to-blue-400/70"
+}
+
+function getDecisionColor(decision: string): string {
+  const v = String(decision || "").toUpperCase()
+
+  if (v === "ALLOW") return GG_COLORS.success
+  if (v === "BLOCK") return GG_COLORS.danger
+  if (v === "REVIEW") return GG_COLORS.warning
+  if (v === "ERROR") return GG_COLORS.textMuted
+
+  return GG_COLORS.primary
+}
+
+/*
+백엔드 필드가 없을 때 프론트 fallback 계산
+*/
+function safePercent(numerator: number | null | undefined, denominator: number | null | undefined): number {
+  const n = Number(numerator || 0)
+  const d = Number(denominator || 0)
+  if (d <= 0) return 0
+  return (n / d) * 100
+}
+
+/*
+숫자 count-up
+- KPI 숫자에만 사용
+*/
+function useCountUp(target: number, durationMs = 700): number {
+  const [value, setValue] = useState(0)
+
+  useEffect(() => {
+    let rafId = 0
+    const start = performance.now()
+    const from = 0
+    const to = Number.isFinite(target) ? target : 0
+
+    function tick(now: number) {
+      const elapsed = now - start
+      const progress = Math.min(elapsed / durationMs, 1)
+      const eased = 1 - Math.pow(1 - progress, 3)
+      const next = from + (to - from) * eased
+
+      setValue(next)
+
+      if (progress < 1) {
+        rafId = requestAnimationFrame(tick)
+      }
+    }
+
+    setValue(0)
+    rafId = requestAnimationFrame(tick)
+
+    return () => cancelAnimationFrame(rafId)
+  }, [target, durationMs])
+
+  return value
+}
+
+/*
+KPI 숫자 표시
+- 숫자일 때만 count-up
+- IP / host 문자열은 그대로 표시
+*/
+function KpiValue({
+  value,
+  rawNumber,
+  suffix,
+  animateNumber = false,
+}: {
+  value: string
+  rawNumber?: number
+  suffix?: string
+  animateNumber?: boolean
+}) {
+  const animated = useCountUp(rawNumber ?? 0, 750)
+
+  if (!animateNumber || rawNumber === undefined) {
+    return <span className="truncate text-2xl font-bold tracking-tight text-[#111827]">{value}</span>
+  }
+
+  const display =
+    suffix === "%"
+      ? `${animated.toFixed(1)}%`
+      : Math.round(animated).toLocaleString()
+
+  return <span className="truncate text-2xl font-bold tracking-tight text-[#111827]">{display}</span>
+}
+
+/*
+간단한 skeleton block
+*/
+function SkeletonBlock({ className }: { className: string }) {
+  return <div className={cn("animate-pulse rounded-md bg-slate-200/70", className)} />
+}
+
+function EmptyChartState({ message }: { message: string }) {
+  return (
+    <div className="flex h-[240px] items-center justify-center text-sm text-[#6B7280]">
+      {message}
+    </div>
+  )
 }
 
 export default function DashboardPage() {
   const [lastHours, setLastHours] = useState<number>(24)
   const [loading, setLoading] = useState<boolean>(false)
   const [error, setError] = useState<string>("")
-  const [data, setData] = useState<DashboardResponse | null>(null)
+  const [data, setData] = useState<ExtendedDashboardResponse | null>(null)
 
-  // 시스템 상태 state
   const [healthLoading, setHealthLoading] = useState<boolean>(false)
   const [healthError, setHealthError] = useState<string>("")
   const [health, setHealth] = useState<SystemHealthResponse | null>(null)
 
-  // 대시보드 통계 로드
+  /*
+  dashboard summary 로드
+  */
   useEffect(() => {
     let cancelled = false
 
     async function run() {
       setLoading(true)
       setError("")
+
       try {
-        const res = await fetchDashboardSummary(lastHours)
+        const res = (await apiGetDashboardSummary(lastHours)) as ExtendedDashboardResponse
         if (!cancelled) {
           setData(res)
         }
@@ -283,7 +328,9 @@ export default function DashboardPage() {
     }
   }, [lastHours])
 
-  // 시스템 상태 로드
+  /*
+  system health 로드
+  */
   useEffect(() => {
     let cancelled = false
 
@@ -292,7 +339,7 @@ export default function DashboardPage() {
       setHealthError("")
 
       try {
-        const res = await fetchSystemHealth()
+        const res = await apiGetSystemHealth()
         if (!cancelled) {
           setHealth(res)
         }
@@ -314,55 +361,134 @@ export default function DashboardPage() {
     }
   }, [])
 
+  /*
+  summary fallback
+  */
+  const summary = data?.summary
+  const blockedRequests = Number(summary?.blocked_requests || 0)
+
+  const aiBlockRate =
+    summary?.ai_block_rate ??
+    safePercent(summary?.ai_enforced_blocks, blockedRequests)
+
+  const policyBlockRate =
+    summary?.policy_block_rate ??
+    safePercent(summary?.policy_enforced_blocks, blockedRequests)
+
+  /*
+  원본 데이터
+  */
+  const requestsOverTime = data?.requests_over_time ?? []
+  const blockVsAllowOverTime = data?.block_vs_allow_over_time ?? []
+  const topHosts = data?.top_hosts ?? []
+  const topPaths = data?.top_paths ?? []
+  const aiScoreDistribution = data?.ai_score_distribution ?? []
+  const aiLatencyOverTime = data?.ai_latency_over_time ?? []
+  const recentEvents = data?.recent_events ?? []
+  const topClientIps: TopClientIp[] = data?.top_client_ips ?? []
+
+  /*
+  파생 데이터
+  */
+  const decisionDistribution = useMemo<DecisionDistributionItem[]>(() => {
+    if (data?.decision_distribution) return data.decision_distribution
+
+    const counts = recentEvents.reduce<Record<string, number>>((acc, log) => {
+      const key = String(log.decision || "UNKNOWN").toUpperCase()
+      acc[key] = (acc[key] || 0) + 1
+      return acc
+    }, {})
+
+    return Object.entries(counts).map(([decision, count]) => ({ decision, count }))
+  }, [data?.decision_distribution, recentEvents])
+
+  const policyVsAiComposition = useMemo<PolicyAiCompositionItem[]>(() => {
+    if (data?.policy_vs_ai_composition) return data.policy_vs_ai_composition
+
+    return [
+      { label: "AI Blocks", count: Number(summary?.ai_enforced_blocks || 0) },
+      { label: "Policy Blocks", count: Number(summary?.policy_enforced_blocks || 0) },
+    ]
+  }, [data?.policy_vs_ai_composition, summary?.ai_enforced_blocks, summary?.policy_enforced_blocks])
+
+  const decisionTotal = useMemo(() => {
+    return decisionDistribution.reduce((acc, item) => acc + Number(item.count || 0), 0)
+  }, [decisionDistribution])
+
+  /*
+  KPI
+  */
   const kpis = useMemo<KpiItem[]>(() => {
-    const summary = data?.summary
+    const topAttacker = topClientIps[0]
+    const topHost = topHosts[0]
+
     return [
       {
         label: "Total Requests",
         value: formatNumber(summary?.total_requests),
+        rawNumber: Number(summary?.total_requests || 0),
         icon: Globe,
-        color: "#2563EB",
         href: "/logs",
+        accentClass: getKpiAccentClass("Total Requests"),
+        subText: "All observed HTTP requests",
+        animateNumber: true,
       },
       {
         label: "Blocked Requests",
         value: formatNumber(summary?.blocked_requests),
+        rawNumber: Number(summary?.blocked_requests || 0),
         icon: ShieldOff,
-        color: "#dc2626",
         href: "/logs?decision=BLOCK",
+        accentClass: getKpiAccentClass("Blocked Requests"),
+        subText: "Directly blocked traffic",
+        animateNumber: true,
       },
       {
-        label: "Block Rate",
-        value: formatPercent(summary?.block_rate),
-        icon: Percent,
-        color: "#d97706",
-        href: "/logs?decision=BLOCK",
-      },
-      {
-        label: "AI-Enforced Blocks",
-        value: formatNumber(summary?.ai_enforced_blocks),
+        label: "AI Block Rate",
+        value: formatPercent(aiBlockRate),
+        rawNumber: aiBlockRate,
+        suffix: "%",
         icon: Brain,
-        color: "#7c3aed",
         href: "/logs?decision=BLOCK&stage=AI_STAGE",
+        accentClass: getKpiAccentClass("AI Block Rate"),
+        subText: "AI-stage share of blocked events",
+        animateNumber: true,
       },
       {
-        label: "Policy-Enforced Blocks",
-        value: formatNumber(summary?.policy_enforced_blocks),
+        label: "Policy Block Rate",
+        value: formatPercent(policyBlockRate),
+        rawNumber: policyBlockRate,
+        suffix: "%",
         icon: FileText,
-        color: "#2563EB",
         href: "/logs?decision=BLOCK&stage=POLICY_STAGE",
+        accentClass: getKpiAccentClass("Policy Block Rate"),
+        subText: "Policy-stage share of blocked events",
+        animateNumber: true,
       },
       {
-        label: "Open Incidents",
-        value: formatNumber(summary?.open_incidents),
-        icon: AlertTriangle,
-        color: "#d97706",
-        href: "/incidents",
+        label: "Top Attacker IP",
+        value: topAttacker?.client_ip || "N/A",
+        icon: Radar,
+        href: topAttacker?.client_ip ? `/logs?client_ip=${encodeURIComponent(topAttacker.client_ip)}` : "/logs",
+        accentClass: getKpiAccentClass("Top Attacker IP"),
+        subText: topAttacker ? `${formatNumber(topAttacker.count)} events` : "No attacker data",
+        animateNumber: false,
+      },
+      {
+        label: "Top Target Host",
+        value: topHost?.host || "N/A",
+        icon: Target,
+        href: topHost?.host ? `/logs?host=${encodeURIComponent(topHost.host)}` : "/logs",
+        accentClass: getKpiAccentClass("Top Target Host"),
+        subText: topHost ? `${formatNumber(topHost.count)} events` : "No target data",
+        animateNumber: false,
       },
     ]
-  }, [data])
+  }, [summary, aiBlockRate, policyBlockRate, topClientIps, topHosts])
 
-  // 시스템 상태 카드 데이터
+  /*
+  health 카드
+  */
   const healthItems = useMemo<HealthItem[]>(() => {
     return [
       {
@@ -388,31 +514,25 @@ export default function DashboardPage() {
     ]
   }, [health])
 
-  const requestsOverTime = data?.requests_over_time ?? []
-  const blockVsAllowOverTime = data?.block_vs_allow_over_time ?? []
-  const topHosts = data?.top_hosts ?? []
-  const topPaths = data?.top_paths ?? []
-  const aiScoreDistribution = data?.ai_score_distribution ?? []
-  const aiLatencyOverTime = data?.ai_latency_over_time ?? []
-  const recentEvents = data?.recent_events ?? []
-
   return (
     <div className="flex flex-col gap-6">
+      {/* header */}
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold text-foreground">Dashboard</h1>
-          <p className="text-sm text-muted-foreground">
-            Security operations overview
+          <h1 className="text-xl font-semibold text-[#111827]">Dashboard</h1>
+          <p className="text-sm text-[#6B7280]">
+            SOC-style security operations overview
             {loading ? " · Loading..." : ""}
             {error ? ` · ${error}` : ""}
           </p>
         </div>
 
+        {/* time range */}
         <div className="flex items-center gap-2">
           <Button
             variant={lastHours === 24 ? "default" : "outline"}
             size="sm"
-            className="h-8 text-xs"
+            className="h-8 text-xs transition-all duration-200"
             onClick={() => setLastHours(24)}
             disabled={loading}
           >
@@ -421,7 +541,7 @@ export default function DashboardPage() {
           <Button
             variant={lastHours === 48 ? "default" : "outline"}
             size="sm"
-            className="h-8 text-xs"
+            className="h-8 text-xs transition-all duration-200"
             onClick={() => setLastHours(48)}
             disabled={loading}
           >
@@ -430,7 +550,7 @@ export default function DashboardPage() {
           <Button
             variant={lastHours === 72 ? "default" : "outline"}
             size="sm"
-            className="h-8 text-xs"
+            className="h-8 text-xs transition-all duration-200"
             onClick={() => setLastHours(72)}
             disabled={loading}
           >
@@ -439,249 +559,403 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-6">
-        {kpis.map((kpi) => (
-          <Link key={kpi.label} href={kpi.href}>
-            <Card className="cursor-pointer border shadow-sm transition-colors hover:bg-muted/40">
-              <CardContent className="flex flex-col gap-1 p-4">
-                <div className="flex items-center gap-2">
-                  <kpi.icon className="size-4" style={{ color: kpi.color }} />
-                  <span className="text-xs font-medium text-muted-foreground">{kpi.label}</span>
-                </div>
-                <span className="text-2xl font-bold text-foreground">{kpi.value}</span>
-              </CardContent>
-            </Card>
-          </Link>
-        ))}
+      {/* KPI */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
+        {loading && !data
+          ? Array.from({ length: 6 }).map((_, idx) => (
+              <Card key={idx} className="border border-[#E5E7EB] bg-white shadow-sm">
+                <CardContent className="flex flex-col gap-3 p-4">
+                  <SkeletonBlock className="h-4 w-24" />
+                  <SkeletonBlock className="h-8 w-28" />
+                  <SkeletonBlock className="h-3 w-32" />
+                </CardContent>
+              </Card>
+            ))
+          : kpis.map((kpi) => (
+              <Link key={kpi.label} href={kpi.href} className="group block">
+                <Card className="relative overflow-hidden border border-[#E5E7EB] bg-white shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md active:scale-[0.99]">
+                  <div className={cn("h-1 w-full bg-gradient-to-r", kpi.accentClass)} />
+
+                  <CardContent className="flex min-w-0 flex-col gap-3 p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <div className="rounded-md bg-slate-50 p-2 transition-colors duration-200 group-hover:bg-slate-100">
+                          <kpi.icon className="size-4 text-[#1E3A8A]" />
+                        </div>
+                        <span className="truncate text-xs font-medium text-[#6B7280]">{kpi.label}</span>
+                      </div>
+
+                      <ArrowRight className="size-4 shrink-0 text-[#9CA3AF] transition-transform duration-200 group-hover:translate-x-0.5 group-hover:text-[#3B82F6]" />
+                    </div>
+
+                    <div className="flex min-w-0 flex-col gap-1">
+                      <KpiValue
+                        value={kpi.value}
+                        rawNumber={kpi.rawNumber}
+                        suffix={kpi.suffix}
+                        animateNumber={kpi.animateNumber}
+                      />
+                      <span className="truncate text-[11px] text-[#9CA3AF]" title={kpi.subText}>
+                        {kpi.subText}
+                      </span>
+                    </div>
+                  </CardContent>
+                </Card>
+              </Link>
+            ))}
       </div>
 
-      {/* 시스템 상태 카드 */}
-      <Card className="border shadow-sm">
+      {/* system status */}
+      <Card className="border border-[#E5E7EB] bg-white shadow-sm">
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between gap-3">
-            <CardTitle className="text-sm font-semibold text-foreground">System Status</CardTitle>
+            <CardTitle className="text-sm font-semibold text-[#111827]">System Status</CardTitle>
             <Badge variant="outline" className="text-xs font-normal">
               {healthLoading ? "Loading..." : healthError ? "Health Check Error" : "Live Status"}
             </Badge>
           </div>
         </CardHeader>
+
         <CardContent>
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             {healthItems.map((item) => (
               <div
                 key={item.label}
-                className="flex items-center justify-between rounded-lg border bg-muted/20 px-4 py-3"
+                className="flex items-center justify-between rounded-xl border border-[#E5E7EB] bg-[#F8FAFC] px-4 py-3 transition-colors duration-200 hover:bg-[#F1F5F9]"
               >
                 <div className="flex items-center gap-3">
-                  <item.icon className="size-4 text-muted-foreground" />
+                  <div className="rounded-md bg-white p-2 shadow-sm">
+                    <item.icon className="size-4 text-[#6B7280]" />
+                  </div>
+
                   <div className="flex flex-col">
-                    <span className="text-xs text-muted-foreground">{item.label}</span>
-                    <span className="text-sm font-medium text-foreground">{item.value}</span>
+                    <span className="text-xs text-[#6B7280]">{item.label}</span>
+                    <span className="text-sm font-medium text-[#111827]">{item.value}</span>
                   </div>
                 </div>
-                <span
-                  className={`rounded-full border px-2 py-1 text-[11px] font-medium ${getHealthBadgeClass(
-                    health?.[item.label.toLowerCase() as keyof SystemHealthResponse] || item.value
-                  )}`}
-                >
-                  {item.value}
-                </span>
+
+                <StatusChip value={item.value} type="health" size="sm" />
               </div>
             ))}
           </div>
 
-          {healthError ? (
-            <div className="mt-3 text-xs text-red-600">{healthError}</div>
-          ) : null}
+          {healthError ? <div className="mt-3 text-xs text-red-600">{healthError}</div> : null}
         </CardContent>
       </Card>
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <Card className="border shadow-sm">
+      {/* request trend + decision distribution */}
+      <div className="grid gap-4 xl:grid-cols-3">
+        <Card className="border border-[#E5E7EB] bg-white shadow-sm xl:col-span-2">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-semibold text-foreground">Requests Over Time</CardTitle>
+            <CardTitle className="text-sm font-semibold text-[#111827]">Requests Over Time</CardTitle>
           </CardHeader>
           <CardContent>
-            <ResponsiveContainer width="100%" height={220}>
-              <LineChart data={requestsOverTime}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                <XAxis dataKey="hour" tick={{ fontSize: 11, fill: "#6b7280" }} tickLine={false} axisLine={false} />
-                <YAxis tick={{ fontSize: 11, fill: "#6b7280" }} tickLine={false} axisLine={false} />
-                <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6, border: "1px solid #e5e7eb" }} />
-                <Line type="monotone" dataKey="requests" stroke="#2563EB" strokeWidth={2} dot={false} />
-              </LineChart>
-            </ResponsiveContainer>
+            {requestsOverTime.length === 0 ? (
+              <EmptyChartState message="No request trend data." />
+            ) : (
+              <ResponsiveContainer width="100%" height={240}>
+                <LineChart data={requestsOverTime}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={GG_COLORS.border} />
+                  <XAxis dataKey="hour" tick={{ fontSize: 11, fill: GG_COLORS.textSecondary }} tickLine={false} axisLine={false} />
+                  <YAxis tick={{ fontSize: 11, fill: GG_COLORS.textSecondary }} tickLine={false} axisLine={false} />
+                  <Tooltip contentStyle={chartTooltipStyle} />
+                  <Line type="monotone" dataKey="requests" stroke={GG_COLORS.primary} strokeWidth={2.25} dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            )}
           </CardContent>
         </Card>
 
-        <Card className="border shadow-sm">
+        <Card className="border border-[#E5E7EB] bg-white shadow-sm">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-semibold text-foreground">Block vs Allow Over Time</CardTitle>
+            <CardTitle className="text-sm font-semibold text-[#111827]">Decision Distribution</CardTitle>
           </CardHeader>
           <CardContent>
-            <ResponsiveContainer width="100%" height={220}>
-              <AreaChart data={blockVsAllowOverTime}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                <XAxis dataKey="hour" tick={{ fontSize: 11, fill: "#6b7280" }} tickLine={false} axisLine={false} />
-                <YAxis tick={{ fontSize: 11, fill: "#6b7280" }} tickLine={false} axisLine={false} />
-                <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6, border: "1px solid #e5e7eb" }} />
-                <Area type="monotone" dataKey="allow" stackId="1" stroke="#10b981" fill="#d1fae5" />
-                <Area type="monotone" dataKey="block" stackId="1" stroke="#dc2626" fill="#fee2e2" />
-                <Area type="monotone" dataKey="review" stackId="1" stroke="#d97706" fill="#fef3c7" />
-              </AreaChart>
-            </ResponsiveContainer>
+            {decisionDistribution.length === 0 ? (
+              <EmptyChartState message="No decision distribution data." />
+            ) : (
+              <ResponsiveContainer width="100%" height={240}>
+                <PieChart>
+                  <Pie
+                    data={decisionDistribution}
+                    dataKey="count"
+                    nameKey="decision"
+                    innerRadius={55}
+                    outerRadius={85}
+                    paddingAngle={3}
+                  >
+                    {decisionDistribution.map((entry, index) => (
+                      <Cell key={`${entry.decision}-${index}`} fill={getDecisionColor(entry.decision)} />
+                    ))}
+                  </Pie>
+                  <Tooltip contentStyle={chartTooltipStyle} />
+                  <Legend wrapperStyle={{ fontSize: 12 }} />
+                  <text
+                    x="50%"
+                    y="48%"
+                    textAnchor="middle"
+                    dominantBaseline="middle"
+                    fill={GG_COLORS.text}
+                    style={{ fontSize: 14, fontWeight: 600 }}
+                  >
+                    {decisionTotal.toLocaleString()}
+                  </text>
+                  <text
+                    x="50%"
+                    y="58%"
+                    textAnchor="middle"
+                    dominantBaseline="middle"
+                    fill={GG_COLORS.textMuted}
+                    style={{ fontSize: 11 }}
+                  >
+                    Events
+                  </text>
+                </PieChart>
+              </ResponsiveContainer>
+            )}
           </CardContent>
         </Card>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <Card className="border shadow-sm">
+      {/* enforcement trend + composition */}
+      <div className="grid gap-4 xl:grid-cols-3">
+        <Card className="border border-[#E5E7EB] bg-white shadow-sm xl:col-span-2">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-semibold text-[#111827]">Block vs Allow Over Time</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {blockVsAllowOverTime.length === 0 ? (
+              <EmptyChartState message="No block / allow trend data." />
+            ) : (
+              <ResponsiveContainer width="100%" height={240}>
+                <AreaChart data={blockVsAllowOverTime}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={GG_COLORS.border} />
+                  <XAxis dataKey="hour" tick={{ fontSize: 11, fill: GG_COLORS.textSecondary }} tickLine={false} axisLine={false} />
+                  <YAxis tick={{ fontSize: 11, fill: GG_COLORS.textSecondary }} tickLine={false} axisLine={false} />
+                  <Tooltip contentStyle={chartTooltipStyle} />
+                  <Area type="monotone" dataKey="allow" stackId="1" stroke={GG_COLORS.success} fill="#D1FAE5" />
+                  <Area type="monotone" dataKey="block" stackId="1" stroke={GG_COLORS.danger} fill="#FEE2E2" />
+                  <Area type="monotone" dataKey="review" stackId="1" stroke={GG_COLORS.warning} fill="#FEF3C7" />
+                </AreaChart>
+              </ResponsiveContainer>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="border border-[#E5E7EB] bg-white shadow-sm">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-semibold text-[#111827]">Policy vs AI Blocks</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {policyVsAiComposition.length === 0 ? (
+              <EmptyChartState message="No enforcement composition data." />
+            ) : (
+              <ResponsiveContainer width="100%" height={240}>
+                <BarChart data={policyVsAiComposition}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={GG_COLORS.border} />
+                  <XAxis dataKey="label" tick={{ fontSize: 11, fill: GG_COLORS.textSecondary }} tickLine={false} axisLine={false} />
+                  <YAxis tick={{ fontSize: 11, fill: GG_COLORS.textSecondary }} tickLine={false} axisLine={false} />
+                  <Tooltip contentStyle={chartTooltipStyle} />
+                  <Bar dataKey="count" radius={[4, 4, 0, 0]}>
+                    {policyVsAiComposition.map((entry, index) => (
+                      <Cell
+                        key={`${entry.label}-${index}`}
+                        fill={entry.label === "AI Blocks" ? GG_COLORS.ai : GG_COLORS.primary}
+                      />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* attacker / target analysis */}
+      <div className="grid gap-4 xl:grid-cols-3">
+        <Card className="border border-[#E5E7EB] bg-white shadow-sm">
           <CardHeader className="pb-2">
             <div className="flex items-center justify-between gap-3">
-              <CardTitle className="text-sm font-semibold text-foreground">Top Target Hosts</CardTitle>
+              <CardTitle className="text-sm font-semibold text-[#111827]">Top Attacker IPs</CardTitle>
               <Link href="/logs">
-                <Badge variant="outline" className="cursor-pointer gap-1 text-xs font-normal">
+                <Badge variant="outline" className="cursor-pointer gap-1 text-xs font-normal transition-colors hover:bg-slate-50">
                   Open Logs <ExternalLink className="size-3" />
                 </Badge>
               </Link>
             </div>
           </CardHeader>
-          <CardContent>
-            <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={topHosts} layout="vertical">
-                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                <XAxis type="number" tick={{ fontSize: 11, fill: "#6b7280" }} tickLine={false} axisLine={false} />
-                <YAxis
-                  dataKey="host"
-                  type="category"
-                  tick={{ fontSize: 10, fill: "#6b7280" }}
-                  tickLine={false}
-                  axisLine={false}
-                  width={140}
-                />
-                <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6, border: "1px solid #e5e7eb" }} />
-                <Bar dataKey="count" fill="#2563EB" radius={[0, 3, 3, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
 
-            <div className="mt-3 flex flex-col gap-1">
-              {topHosts.slice(0, 5).map((item) => (
-                <Link
-                  key={item.host}
-                  href={`/logs?host=${encodeURIComponent(item.host)}`}
-                  className="text-xs text-primary hover:underline"
-                >
-                  {item.host} ({item.count})
-                </Link>
-              ))}
+          <CardContent>
+            <div className="flex flex-col gap-2">
+              {topClientIps.length === 0 ? (
+                <div className="text-sm text-[#6B7280]">No attacker data.</div>
+              ) : (
+                topClientIps.slice(0, 8).map((item, index) => (
+                  <Link
+                    key={`${item.client_ip}-${index}`}
+                    href={`/logs?client_ip=${encodeURIComponent(item.client_ip)}`}
+                    className="flex items-center justify-between rounded-md border border-[#E5E7EB] bg-[#F8FAFC] px-3 py-2 text-xs transition-colors hover:bg-slate-50"
+                    title={item.client_ip}
+                  >
+                    <span className="truncate font-mono text-[#111827]">
+                      {index + 1}. {item.client_ip}
+                    </span>
+                    <span className="font-mono text-[#6B7280]">{item.count}</span>
+                  </Link>
+                ))
+              )}
             </div>
           </CardContent>
         </Card>
 
-        <Card className="border shadow-sm">
+        <Card className="border border-[#E5E7EB] bg-white shadow-sm">
           <CardHeader className="pb-2">
             <div className="flex items-center justify-between gap-3">
-              <CardTitle className="text-sm font-semibold text-foreground">Top Target Paths</CardTitle>
+              <CardTitle className="text-sm font-semibold text-[#111827]">Top Target Hosts</CardTitle>
               <Link href="/logs">
-                <Badge variant="outline" className="cursor-pointer gap-1 text-xs font-normal">
+                <Badge variant="outline" className="cursor-pointer gap-1 text-xs font-normal transition-colors hover:bg-slate-50">
                   Open Logs <ExternalLink className="size-3" />
                 </Badge>
               </Link>
             </div>
           </CardHeader>
-          <CardContent>
-            <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={topPaths} layout="vertical">
-                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                <XAxis type="number" tick={{ fontSize: 11, fill: "#6b7280" }} tickLine={false} axisLine={false} />
-                <YAxis
-                  dataKey="path"
-                  type="category"
-                  tick={{ fontSize: 10, fill: "#6b7280" }}
-                  tickLine={false}
-                  axisLine={false}
-                  width={140}
-                />
-                <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6, border: "1px solid #e5e7eb" }} />
-                <Bar dataKey="count" fill="#059669" radius={[0, 3, 3, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
 
-            <div className="mt-3 flex flex-col gap-1">
-              {topPaths.slice(0, 5).map((item) => (
-                <div
-                  key={`${item.path}-${item.count}`}
-                  className="truncate text-xs text-muted-foreground"
-                  title={item.path}
-                >
-                  {item.path} ({item.count})
-                </div>
-              ))}
+          <CardContent>
+            {topHosts.length === 0 ? (
+              <EmptyChartState message="No target host data." />
+            ) : (
+              <ResponsiveContainer width="100%" height={240}>
+                <BarChart data={topHosts} layout="vertical">
+                  <CartesianGrid strokeDasharray="3 3" stroke={GG_COLORS.border} />
+                  <XAxis type="number" tick={{ fontSize: 11, fill: GG_COLORS.textSecondary }} tickLine={false} axisLine={false} />
+                  <YAxis
+                    dataKey="host"
+                    type="category"
+                    tick={{ fontSize: 10, fill: GG_COLORS.textSecondary }}
+                    tickLine={false}
+                    axisLine={false}
+                    width={150}
+                  />
+                  <Tooltip contentStyle={chartTooltipStyle} />
+                  <Bar dataKey="count" fill={GG_COLORS.primary} radius={[0, 4, 4, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="border border-[#E5E7EB] bg-white shadow-sm">
+          <CardHeader className="pb-2">
+            <div className="flex items-center justify-between gap-3">
+              <CardTitle className="text-sm font-semibold text-[#111827]">Top Target Paths</CardTitle>
+              <Link href="/logs">
+                <Badge variant="outline" className="cursor-pointer gap-1 text-xs font-normal transition-colors hover:bg-slate-50">
+                  Open Logs <ExternalLink className="size-3" />
+                </Badge>
+              </Link>
             </div>
+          </CardHeader>
+
+          <CardContent>
+            {topPaths.length === 0 ? (
+              <EmptyChartState message="No target path data." />
+            ) : (
+              <ResponsiveContainer width="100%" height={240}>
+                <BarChart data={topPaths} layout="vertical">
+                  <CartesianGrid strokeDasharray="3 3" stroke={GG_COLORS.border} />
+                  <XAxis type="number" tick={{ fontSize: 11, fill: GG_COLORS.textSecondary }} tickLine={false} axisLine={false} />
+                  <YAxis
+                    dataKey="path"
+                    type="category"
+                    tick={{ fontSize: 10, fill: GG_COLORS.textSecondary }}
+                    tickLine={false}
+                    axisLine={false}
+                    width={150}
+                  />
+                  <Tooltip contentStyle={chartTooltipStyle} />
+                  <Bar dataKey="count" fill={GG_COLORS.teal} radius={[0, 4, 4, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
           </CardContent>
         </Card>
       </div>
 
+      {/* AI charts */}
       <div className="grid gap-4 lg:grid-cols-2">
-        <Card className="border shadow-sm">
+        <Card className="border border-[#E5E7EB] bg-white shadow-sm">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-semibold text-foreground">AI Score Distribution</CardTitle>
+            <CardTitle className="text-sm font-semibold text-[#111827]">AI Score Distribution</CardTitle>
           </CardHeader>
           <CardContent>
-            <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={aiScoreDistribution}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                <XAxis dataKey="range" tick={{ fontSize: 10, fill: "#6b7280" }} tickLine={false} axisLine={false} />
-                <YAxis tick={{ fontSize: 11, fill: "#6b7280" }} tickLine={false} axisLine={false} />
-                <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6, border: "1px solid #e5e7eb" }} />
-                <Bar dataKey="count" fill="#7c3aed" radius={[3, 3, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+            {aiScoreDistribution.length === 0 ? (
+              <EmptyChartState message="No AI score distribution data." />
+            ) : (
+              <ResponsiveContainer width="100%" height={240}>
+                <BarChart data={aiScoreDistribution}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={GG_COLORS.border} />
+                  <XAxis dataKey="range" tick={{ fontSize: 10, fill: GG_COLORS.textSecondary }} tickLine={false} axisLine={false} />
+                  <YAxis tick={{ fontSize: 11, fill: GG_COLORS.textSecondary }} tickLine={false} axisLine={false} />
+                  <Tooltip contentStyle={chartTooltipStyle} />
+                  <Bar dataKey="count" fill={GG_COLORS.ai} radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
           </CardContent>
         </Card>
 
-        <Card className="border shadow-sm">
+        <Card className="border border-[#E5E7EB] bg-white shadow-sm">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-semibold text-foreground">AI Latency Over Time</CardTitle>
+            <CardTitle className="text-sm font-semibold text-[#111827]">AI Latency Over Time</CardTitle>
           </CardHeader>
           <CardContent>
-            <ResponsiveContainer width="100%" height={220}>
-              <LineChart data={aiLatencyOverTime}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                <XAxis dataKey="hour" tick={{ fontSize: 11, fill: "#6b7280" }} tickLine={false} axisLine={false} />
-                <YAxis tick={{ fontSize: 11, fill: "#6b7280" }} tickLine={false} axisLine={false} unit="ms" />
-                <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6, border: "1px solid #e5e7eb" }} />
-                <Line type="monotone" dataKey="avg_latency" stroke="#2563EB" strokeWidth={2} dot={false} name="Avg" />
-                <Line
-                  type="monotone"
-                  dataKey="max_latency"
-                  stroke="#dc2626"
-                  strokeWidth={1.5}
-                  dot={false}
-                  strokeDasharray="4 2"
-                  name="Max"
-                />
-              </LineChart>
-            </ResponsiveContainer>
+            {aiLatencyOverTime.length === 0 ? (
+              <EmptyChartState message="No AI latency data." />
+            ) : (
+              <ResponsiveContainer width="100%" height={240}>
+                <LineChart data={aiLatencyOverTime}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={GG_COLORS.border} />
+                  <XAxis dataKey="hour" tick={{ fontSize: 11, fill: GG_COLORS.textSecondary }} tickLine={false} axisLine={false} />
+                  <YAxis tick={{ fontSize: 11, fill: GG_COLORS.textSecondary }} tickLine={false} axisLine={false} unit="ms" />
+                  <Tooltip contentStyle={chartTooltipStyle} />
+                  <Line type="monotone" dataKey="avg_latency" stroke={GG_COLORS.primary} strokeWidth={2.25} dot={false} name="Avg" />
+                  <Line
+                    type="monotone"
+                    dataKey="max_latency"
+                    stroke={GG_COLORS.danger}
+                    strokeWidth={1.5}
+                    dot={false}
+                    strokeDasharray="4 2"
+                    name="Max"
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            )}
           </CardContent>
         </Card>
       </div>
 
-      <Card className="border shadow-sm">
+      {/* recent events */}
+      <Card className="overflow-hidden border border-[#E5E7EB] bg-white shadow-sm">
         <CardHeader className="pb-2">
           <div className="flex items-center justify-between">
-            <CardTitle className="text-sm font-semibold text-foreground">Recent Security Events</CardTitle>
+            <div>
+              <CardTitle className="text-sm font-semibold text-[#111827]">Recent Security Events</CardTitle>
+              <p className="mt-1 text-xs text-[#6B7280]">Latest analyst-relevant traffic and enforcement results</p>
+            </div>
+
             <Link href="/logs">
-              <Badge variant="outline" className="cursor-pointer gap-1 text-xs font-normal">
+              <Badge variant="outline" className="cursor-pointer gap-1 text-xs font-normal transition-colors hover:bg-slate-50">
                 View all <ExternalLink className="size-3" />
               </Badge>
             </Link>
           </div>
         </CardHeader>
+
         <CardContent className="p-0">
           <Table>
             <TableHeader>
-              <TableRow className="bg-muted/50">
+              <TableRow className="bg-[#F8FAFC]">
                 <TableHead className="text-xs">Timestamp</TableHead>
                 <TableHead className="text-xs">Client IP</TableHead>
                 <TableHead className="text-xs">Host</TableHead>
@@ -692,41 +966,49 @@ export default function DashboardPage() {
                 <TableHead className="text-xs">Actions</TableHead>
               </TableRow>
             </TableHeader>
+
             <TableBody>
               {!loading && recentEvents.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={8} className="py-10 text-center text-sm text-muted-foreground">
+                  <TableCell colSpan={8} className="py-10 text-center text-sm text-[#6B7280]">
                     No recent events found.
                   </TableCell>
                 </TableRow>
               ) : null}
 
               {recentEvents.map((log) => (
-                <TableRow key={log.log_id} className="text-xs">
-                  <TableCell className="font-mono text-[11px] text-muted-foreground">
-                    {formatTimestamp(log.detect_timestamp)}
-                  </TableCell>
+                <TableRow key={log.log_id} className={cn("text-xs transition-colors duration-150", getRecentEventRowClass(log))}>
+                  <TableCell className="font-mono text-[11px] text-[#6B7280]">{formatTimestamp(log.detect_timestamp)}</TableCell>
+
                   <TableCell className="font-mono text-[11px]">{log.client_ip || "N/A"}</TableCell>
-                  <TableCell className="max-w-[160px] truncate font-medium text-foreground">
+
+                  <TableCell className="max-w-[180px] truncate font-medium text-[#111827]">
                     {log.host || "N/A"}
                   </TableCell>
-                  <TableCell className="max-w-[120px] truncate text-muted-foreground">
-                    {log.path || "N/A"}
-                  </TableCell>
+
+                  <TableCell className="max-w-[150px] truncate text-[#6B7280]">{log.path || "N/A"}</TableCell>
+
                   <TableCell>
-                    <StatusChip value={log.decision || "ERROR"} />
+                    <StatusChip value={log.decision || "ERROR"} size="sm" />
                   </TableCell>
+
                   <TableCell>
-                    <StatusChip value={log.decision_stage || "FAIL_STAGE"} type="stage" />
+                    <StatusChip value={log.decision_stage || "FAIL_STAGE"} type="stage" size="sm" />
                   </TableCell>
+
                   <TableCell className="font-mono text-[11px]">
                     {log.engine_latency_ms !== null && log.engine_latency_ms !== undefined
                       ? `${log.engine_latency_ms}ms`
                       : "N/A"}
                   </TableCell>
+
                   <TableCell>
                     <Link href={`/logs/${log.log_id}`}>
-                      <Button variant="ghost" size="sm" className="h-6 px-2 text-xs text-primary">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 px-2 text-xs text-[#1E3A8A] transition-colors hover:bg-slate-100 hover:text-[#2563EB]"
+                      >
                         Detail
                       </Button>
                     </Link>

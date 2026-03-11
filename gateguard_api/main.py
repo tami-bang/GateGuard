@@ -1849,12 +1849,15 @@ def _series_map_to_list(labels: List[str], data_map: Dict[str, dict], defaults: 
         rows.append(row)
     return rows
 
-
 @app.get("/v1/dashboard/summary")
 def get_dashboard_summary(
     last_hours: int = Query(24, ge=1, le=168),
 ):
-    # 최근 N시간 집계
+    """
+    Dashboard summary API
+    - 기존 KPI / 차트 데이터 유지
+    - SOC 확장용 top_client_ips / decision_distribution / policy_vs_ai_composition 추가
+    """
     window_start = datetime.now().replace(minute=0, second=0, microsecond=0) - timedelta(hours=last_hours - 1)
     window_start_str = window_start.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1875,7 +1878,9 @@ def get_dashboard_summary(
 
     with db_conn() as conn:
         with conn.cursor() as cur:
+            # =========================
             # KPI
+            # =========================
             cur.execute(
                 f"""
                 SELECT COUNT(*) AS cnt
@@ -1935,8 +1940,12 @@ def get_dashboard_summary(
             open_incidents = int(cur.fetchone()["cnt"] or 0)
 
             block_rate = round((blocked_requests / total_requests * 100.0), 1) if total_requests > 0 else 0.0
+            ai_block_rate = round((ai_enforced_blocks / blocked_requests * 100.0), 1) if blocked_requests > 0 else 0.0
+            policy_block_rate = round((policy_enforced_blocks / blocked_requests * 100.0), 1) if blocked_requests > 0 else 0.0
 
+            # =========================
             # Requests Over Time
+            # =========================
             cur.execute(
                 f"""
                 SELECT
@@ -1954,7 +1963,9 @@ def get_dashboard_summary(
             req_map = {r["hour"]: {"requests": int(r["requests"] or 0)} for r in req_rows}
             requests_over_time = _series_map_to_list(labels, req_map, {"requests": 0})
 
+            # =========================
             # Block vs Allow Over Time
+            # =========================
             cur.execute(
                 f"""
                 SELECT
@@ -1985,7 +1996,9 @@ def get_dashboard_summary(
                 {"allow": 0, "block": 0, "review": 0},
             )
 
+            # =========================
             # Top Hosts
+            # =========================
             cur.execute(
                 f"""
                 SELECT al.host, COUNT(*) AS cnt
@@ -2000,7 +2013,9 @@ def get_dashboard_summary(
             )
             top_hosts = [{"host": r["host"], "count": int(r["cnt"] or 0)} for r in (cur.fetchall() or [])]
 
+            # =========================
             # Top Paths
+            # =========================
             cur.execute(
                 f"""
                 SELECT al.path, COUNT(*) AS cnt
@@ -2017,7 +2032,59 @@ def get_dashboard_summary(
             )
             top_paths = [{"path": r["path"], "count": int(r["cnt"] or 0)} for r in (cur.fetchall() or [])]
 
+            # =========================
+            # Top Client IPs (신규)
+            # =========================
+            cur.execute(
+                f"""
+                SELECT al.client_ip, COUNT(*) AS cnt
+                FROM access_log al
+                WHERE al.detect_timestamp >= %s
+                  AND al.client_ip IS NOT NULL
+                  AND al.client_ip <> ''
+                  AND {security_filter_sql}
+                GROUP BY al.client_ip
+                ORDER BY cnt DESC, al.client_ip ASC
+                LIMIT 8
+                """,
+                (window_start_str,),
+            )
+            top_client_ips = [
+                {"client_ip": r["client_ip"], "count": int(r["cnt"] or 0)}
+                for r in (cur.fetchall() or [])
+            ]
+
+            # =========================
+            # Decision Distribution (신규)
+            # =========================
+            cur.execute(
+                f"""
+                SELECT al.decision, COUNT(*) AS cnt
+                FROM access_log al
+                WHERE al.detect_timestamp >= %s
+                  AND {security_filter_sql}
+                GROUP BY al.decision
+                ORDER BY cnt DESC, al.decision ASC
+                """,
+                (window_start_str,),
+            )
+            decision_distribution = [
+                {"decision": r["decision"], "count": int(r["cnt"] or 0)}
+                for r in (cur.fetchall() or [])
+            ]
+
+            # =========================
+            # Policy vs AI Composition (신규)
+            # BLOCK 기준으로 stage별 구성비
+            # =========================
+            policy_vs_ai_composition = [
+                {"label": "AI Blocks", "count": int(ai_enforced_blocks)},
+                {"label": "Policy Blocks", "count": int(policy_enforced_blocks)},
+            ]
+
+            # =========================
             # AI Score Distribution
+            # =========================
             cur.execute(
                 """
                 SELECT
@@ -2061,7 +2128,9 @@ def get_dashboard_summary(
                 for score_range in score_ranges
             ]
 
+            # =========================
             # AI Latency Over Time
+            # =========================
             cur.execute(
                 """
                 SELECT
@@ -2090,7 +2159,9 @@ def get_dashboard_summary(
                 {"avg_latency": 0, "max_latency": 0},
             )
 
+            # =========================
             # Recent Security Events
+            # =========================
             cur.execute(
                 f"""
                 SELECT
@@ -2140,11 +2211,16 @@ def get_dashboard_summary(
             "ai_enforced_blocks": ai_enforced_blocks,
             "policy_enforced_blocks": policy_enforced_blocks,
             "open_incidents": open_incidents,
+            "ai_block_rate": ai_block_rate,
+            "policy_block_rate": policy_block_rate,
         },
         "requests_over_time": requests_over_time,
         "block_vs_allow_over_time": block_vs_allow_over_time,
         "top_hosts": top_hosts,
         "top_paths": top_paths,
+        "top_client_ips": top_client_ips,
+        "decision_distribution": decision_distribution,
+        "policy_vs_ai_composition": policy_vs_ai_composition,
         "ai_score_distribution": ai_score_distribution,
         "ai_latency_over_time": ai_latency_over_time,
         "recent_events": recent_events,
