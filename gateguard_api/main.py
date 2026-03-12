@@ -1740,51 +1740,6 @@ def system_health():
         "model_version": get_model_version() if ai_model == "loaded" else None,
     }
 
-@app.post("/v1/score", response_model=ScoreResponse)
-def score(req: ScoreRequest, authorization: Optional[str] = Header(default=None)):
-    """
-    SSOT 정책: FastAPI는 ai_analysis/access_log에 기록하지 않는다.
-    - 엔진이 request_id로 access_log를 만들고,
-    - 엔진이 /v1/score 응답 결과(정상/실패)를 파싱해서 ai_analysis 및 access_log를 기록한다.
-    """
-    require_token(authorization)
-
-    start = time.time()
-
-    h = (req.host or "").lower()
-    p = (req.path or "").lower()
-
-    # timeout_test: 엔진 curl timeout 유도
-    if "timeout_test" in h or "timeout_test" in p:
-        time.sleep(10)
-
-    # error_test: HTTP 500 강제 (엔진이 HTTP status로 실패 기록)
-    if "error_test" in h or "error_test" in p:
-        raise HTTPException(status_code=500, detail="forced 500 for engine test")
-
-    # invalid_test: 200이지만 JSON 깨진 응답 (엔진이 파싱 실패로 실패 기록)
-    if "invalid_test" in h or "invalid_test" in p:
-        return Response(
-            content='{"request_id": "' + req.request_id + '", "score": 0.1, "label": ',
-            media_type="application/json",
-            status_code=200,
-        )
-
-    threshold = THRESHOLD
-    s = simple_score(req.host, req.path)
-    lbl = label_from_score(s, threshold)
-    latency_ms = int((time.time() - start) * 1000)
-
-    return ScoreResponse(
-        request_id=req.request_id,
-        model_version=MODEL_VERSION,
-        score=round(float(s), 4),
-        label=lbl,
-        threshold=float(threshold),
-        latency_ms=int(latency_ms),
-    )
-
-
 @app.get("/v1/logs/{log_id}")
 def get_log_detail(log_id: int):
     with db_conn() as conn:

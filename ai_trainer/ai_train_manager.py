@@ -10,12 +10,12 @@ from ai_train_program import (
     fit_feature_pipeline,
     predict,
     predict_top_score,
-    save_artifacts,
     train_model,
     transform_feature_pipeline,
 )
 from data_preprocessor import preprocess_csv_files
 from evaluator import evaluate_classification
+from extract_to_file import save_all_artifacts
 
 
 def get_training_csv_paths(config: Dict[str, Any]) -> List[str]:
@@ -73,12 +73,13 @@ def run_training_pipeline(config: Dict[str, Any]) -> Dict[str, Any]:
     metrics = evaluate_classification(y_valid_labels, y_pred, y_score)
 
     output_dir = config["output"]["output_dir"]
-    save_artifacts(
+    artifact_paths = save_all_artifacts(
         model=trained_model,
         vectorizer=vectorizer,
         label_encoder=label_encoder,
         config=config,
         metrics=metrics,
+        feature_columns=dataset.feature_columns,
         output_dir=output_dir,
     )
 
@@ -89,6 +90,7 @@ def run_training_pipeline(config: Dict[str, Any]) -> Dict[str, Any]:
         "labels": sorted(dataset.labels.unique().tolist()),
         "artifacts": {
             "output_dir": output_dir,
+            **artifact_paths,
         },
         "metrics": metrics,
     }

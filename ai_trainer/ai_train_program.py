@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import json
-import os
-import pickle
 from typing import Any, Dict, Tuple
 
 import numpy as np
@@ -114,37 +111,3 @@ def predict_top_score(model: Any, x_valid):
     if probabilities is None:
         return None
     return np.max(probabilities, axis=1)
-
-
-def save_artifacts(
-    model: Any,
-    vectorizer: TfidfVectorizer,
-    label_encoder: LabelEncoder,
-    config: Dict[str, Any],
-    metrics: Dict[str, Any],
-    output_dir: str,
-) -> None:
-    os.makedirs(output_dir, exist_ok=True)
-
-    with open(os.path.join(output_dir, "model.pkl"), "wb") as f:
-        pickle.dump(model, f)
-
-    with open(os.path.join(output_dir, "vectorizer.pkl"), "wb") as f:
-        pickle.dump(vectorizer, f)
-
-    with open(os.path.join(output_dir, "label_encoder.pkl"), "wb") as f:
-        pickle.dump(label_encoder, f)
-
-    meta = {
-        "model_version": config.get("model_version", "url-threat-v1"),
-        "task": "url_classification",
-        "labels": list(label_encoder.classes_),
-        "algorithm": config["training"]["algorithm"],
-        "feature_mode": "tfidf_plus_numeric",
-    }
-
-    with open(os.path.join(output_dir, "meta.json"), "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
-
-    with open(os.path.join(output_dir, "metrics.json"), "w", encoding="utf-8") as f:
-        json.dump(metrics, f, ensure_ascii=False, indent=2)
