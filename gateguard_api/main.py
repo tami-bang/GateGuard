@@ -1804,6 +1804,72 @@ def _series_map_to_list(labels: List[str], data_map: Dict[str, dict], defaults: 
         rows.append(row)
     return rows
 
+@app.get("/v1/dashboard/ai-threat-distribution")
+def get_ai_threat_distribution(
+    last_hours: int = Query(24, ge=1, le=168),
+):
+    """
+    최근 N시간 ai_analysis.label 분포 조회
+    - benign / phishing / malware
+    - 과거 malicious 라벨은 malware로 정규화
+    - Dashboard Pie Chart 용
+    """
+    window_start = datetime.now().replace(minute=0, second=0, microsecond=0) - timedelta(hours=last_hours - 1)
+    window_start_str = window_start.strftime("%Y-%m-%d %H:%M:%S")
+
+    base_labels = ["benign", "phishing", "malware"]
+    counts_map = {label: 0 for label in base_labels}
+
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                  label,
+                  COUNT(*) AS cnt
+                FROM ai_analysis
+                WHERE analyzed_at >= %s
+                  AND label IS NOT NULL
+                  AND label <> ''
+                GROUP BY label
+                ORDER BY cnt DESC, label ASC
+                """,
+                (window_start_str,),
+            )
+            rows = cur.fetchall() or []
+
+    for row in rows:
+        label = str(row.get("label") or "").strip().lower()
+        cnt = int(row.get("cnt") or 0)
+
+        if not label:
+            continue
+
+        if label == "malicious":
+            label = "malware"
+
+        if label in counts_map:
+            counts_map[label] += cnt
+        else:
+            counts_map[label] = cnt
+
+    total = sum(counts_map.values())
+
+    items = []
+    for label, count in counts_map.items():
+        percent = round((count / total * 100.0), 1) if total > 0 else 0.0
+        items.append({
+            "label": label,
+            "count": int(count),
+            "percent": percent,
+        })
+
+    return {
+        "items": items,
+        "total": int(total),
+        "last_hours": last_hours,
+    }
+
 @app.get("/v1/dashboard/summary")
 def get_dashboard_summary(
     last_hours: int = Query(24, ge=1, le=168),

@@ -45,8 +45,10 @@ import {
 } from "recharts"
 
 import {
+  apiGetAiThreatDistribution,
   apiGetDashboardSummary,
   apiGetSystemHealth,
+  type DashboardAiThreatDistributionItem,
   type DashboardResponse,
   type SystemHealthResponse,
 } from "@/lib/api-client"
@@ -195,6 +197,16 @@ function getDecisionColor(decision: string): string {
   return GG_COLORS.primary
 }
 
+function getAiThreatColor(label: string): string {
+  const v = String(label || "").toLowerCase()
+
+  if (v === "benign") return GG_COLORS.success
+  if (v === "phishing") return GG_COLORS.warning
+  if (v === "malware") return GG_COLORS.danger
+
+  return GG_COLORS.ai
+}
+
 /*
 백엔드 필드가 없을 때 프론트 fallback 계산
 */
@@ -294,7 +306,11 @@ export default function DashboardPage() {
   const [healthLoading, setHealthLoading] = useState<boolean>(false)
   const [healthError, setHealthError] = useState<string>("")
   const [health, setHealth] = useState<SystemHealthResponse | null>(null)
-
+  const [aiThreatDist, setAiThreatDist] = useState<DashboardAiThreatDistributionItem[]>([])
+  const [aiThreatTotal, setAiThreatTotal] = useState<number>(0)
+  const [aiThreatLoading, setAiThreatLoading] = useState<boolean>(false)
+  const [aiThreatError, setAiThreatError] = useState<string>("")
+  
   /*
   dashboard summary 로드
   */
@@ -317,6 +333,42 @@ export default function DashboardPage() {
       } finally {
         if (!cancelled) {
           setLoading(false)
+        }
+      }
+    }
+
+    run()
+
+    return () => {
+      cancelled = true
+    }
+  }, [lastHours])
+  
+    /*
+  AI threat distribution 로드
+  */
+  useEffect(() => {
+    let cancelled = false
+
+    async function run() {
+      setAiThreatLoading(true)
+      setAiThreatError("")
+
+      try {
+        const res = await apiGetAiThreatDistribution(lastHours)
+        if (!cancelled) {
+          setAiThreatDist(res.items ?? [])
+          setAiThreatTotal(Number(res.total || 0))
+        }
+      } catch (e: any) {
+        if (!cancelled) {
+          setAiThreatError(e?.message || "Failed to load AI threat distribution")
+          setAiThreatDist([])
+          setAiThreatTotal(0)
+        }
+      } finally {
+        if (!cancelled) {
+          setAiThreatLoading(false)
         }
       }
     }
@@ -882,7 +934,68 @@ export default function DashboardPage() {
       </div>
 
       {/* AI charts */}
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid gap-4 lg:grid-cols-3">
+	            <Card className="border border-[#E5E7EB] bg-white shadow-sm">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-semibold text-[#111827]">AI Threat Distribution</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {aiThreatLoading ? (
+              <EmptyChartState message="Loading AI threat distribution..." />
+            ) : aiThreatError ? (
+              <EmptyChartState message={aiThreatError} />
+            ) : aiThreatDist.length === 0 ? (
+              <EmptyChartState message="No AI threat distribution data." />
+            ) : (
+              <ResponsiveContainer width="100%" height={240}>
+                <PieChart>
+                  <Pie
+                    data={aiThreatDist}
+                    dataKey="count"
+                    nameKey="label"
+                    innerRadius={55}
+                    outerRadius={85}
+                    paddingAngle={3}
+                  >
+                    {aiThreatDist.map((entry, index) => (
+                      <Cell key={`${entry.label}-${index}`} fill={getAiThreatColor(entry.label)} />
+                    ))}
+                  </Pie>
+                  <Tooltip
+                    contentStyle={chartTooltipStyle}
+                    formatter={(value: any, _name: any, props: any) => {
+                      const payload = props?.payload
+                      if (!payload) return [value, "Count"]
+                      return [`${payload.count} (${payload.percent}%)`, payload.label]
+                    }}
+                  />
+                  <Legend wrapperStyle={{ fontSize: 12 }} />
+                  <text
+                    x="50%"
+                    y="48%"
+                    textAnchor="middle"
+                    dominantBaseline="middle"
+                    fill={GG_COLORS.text}
+                    style={{ fontSize: 14, fontWeight: 600 }}
+                  >
+                    {aiThreatTotal.toLocaleString()}
+                  </text>
+                  <text
+                    x="50%"
+                    y="58%"
+                    textAnchor="middle"
+                    dominantBaseline="middle"
+                    fill={GG_COLORS.textMuted}
+                    style={{ fontSize: 11 }}
+                  >
+                    AI Labels
+                  </text>
+                </PieChart>
+              </ResponsiveContainer>
+            )}
+          </CardContent>
+        </Card>
+
         <Card className="border border-[#E5E7EB] bg-white shadow-sm">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-semibold text-[#111827]">AI Score Distribution</CardTitle>

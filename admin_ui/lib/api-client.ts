@@ -156,6 +156,18 @@ export type DashboardResponse = {
   policy_vs_ai_composition?: DashboardPolicyAiComposition[]
 }
 
+export type DashboardAiThreatDistributionItem = {
+  label: string
+  count: number
+  percent: number
+}
+
+export type DashboardAiThreatDistributionResponse = {
+  items: DashboardAiThreatDistributionItem[]
+  total: number
+  last_hours: number
+}
+
 export type SystemHealthResponse = {
   engine: string
   fastapi: string
@@ -506,6 +518,14 @@ export async function apiGetDashboardSummary(lastHours = 24): Promise<DashboardR
 
 export async function apiGetSystemHealth(): Promise<SystemHealthResponse> {
   return await httpJson<SystemHealthResponse>(`/v1/system/health`)
+}
+
+export async function apiGetAiThreatDistribution(lastHours = 24): Promise<DashboardAiThreatDistributionResponse> {
+  const qs = buildQuery({
+    last_hours: lastHours,
+  })
+
+  return await httpJson<DashboardAiThreatDistributionResponse>(`/v1/dashboard/ai-threat-distribution${qs}`)
 }
 
 /* =========================
