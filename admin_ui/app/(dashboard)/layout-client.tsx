@@ -1,9 +1,10 @@
 "use client"
 
-import { useEffect, useMemo } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import { AppSidebar } from "@/components/app-sidebar"
 import { AppHeader } from "@/components/app-header"
+import { GateGuardSplash } from "@/components/gateguard-splash"
 import { useAuth } from "@/lib/auth-context"
 
 export default function DashboardLayoutClient({ children }: { children: React.ReactNode }) {
@@ -11,6 +12,7 @@ export default function DashboardLayoutClient({ children }: { children: React.Re
   const router = useRouter()
   const pathname = usePathname()
   const searchParams = useSearchParams()
+  const [showSplash, setShowSplash] = useState(false)
 
   const current = useMemo(() => {
     const qs = searchParams?.toString()
@@ -24,6 +26,16 @@ export default function DashboardLayoutClient({ children }: { children: React.Re
     }
   }, [bootstrapped, isAuthenticated, router, current])
 
+  useEffect(() => {
+    if (!bootstrapped || !isAuthenticated) return
+
+    const splashSeen = sessionStorage.getItem("gg_dashboard_splash_seen")
+    if (splashSeen === "1") return
+
+    sessionStorage.setItem("gg_dashboard_splash_seen", "1")
+    setShowSplash(true)
+  }, [bootstrapped, isAuthenticated])
+
   if (!bootstrapped) {
     return <div className="min-h-screen bg-background" />
   }
@@ -33,12 +45,20 @@ export default function DashboardLayoutClient({ children }: { children: React.Re
   }
 
   return (
-    <div className="flex min-h-screen bg-background">
-      <AppSidebar />
-      <div className="flex flex-1 flex-col pl-60 transition-all duration-200" id="main-content">
-        <AppHeader />
-        <main className="flex-1 p-6">{children}</main>
+    <>
+      <GateGuardSplash
+        visible={showSplash}
+        durationMs={1200}
+        onDone={() => setShowSplash(false)}
+      />
+
+      <div className="flex min-h-screen bg-background">
+        <AppSidebar />
+        <div className="flex flex-1 flex-col pl-60 transition-all duration-200" id="main-content">
+          <AppHeader />
+          <main className="flex-1 p-6">{children}</main>
+        </div>
       </div>
-    </div>
+    </>
   )
 }
