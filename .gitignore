@@ -58,3 +58,7 @@ engine_C/nohup.out
 
 # FastAPI stray file
 fastapi/=
+
+# AI trainer raw dataset
+ai_trainer/data/raw/
+ai_trainer/artifacts/latest/*.pkl
