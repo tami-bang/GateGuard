@@ -62,3 +62,9 @@ fastapi/=
 # AI trainer raw dataset
 ai_trainer/data/raw/
 ai_trainer/artifacts/latest/*.pkl
+
+# AI Trainer artifacts
+ai_trainer/artifacts/
+
+# dataset
+ai_trainer/data/

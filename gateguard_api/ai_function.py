@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from typing import Any, Dict, List
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 import pandas as pd
@@ -36,6 +36,41 @@ SUSPICIOUS_KEYWORDS = [
     "apk",
 ]
 
+BRAND_KEYWORDS = [
+    "paypal",
+    "google",
+    "apple",
+    "microsoft",
+    "naver",
+    "kakao",
+    "facebook",
+    "instagram",
+    "amazon",
+    "netflix",
+    "telegram",
+    "whatsapp",
+    "bank",
+    "woori",
+    "kb",
+    "shinhan",
+    "hana",
+    "nh",
+]
+
+QUERY_SUSPICIOUS_KEYWORDS = [
+    "redirect",
+    "return",
+    "continue",
+    "next",
+    "target",
+    "session",
+    "token",
+    "auth",
+    "key",
+    "login",
+    "verify",
+]
+
 SUSPICIOUS_EXTENSIONS = [
     ".exe",
     ".apk",
@@ -46,7 +81,20 @@ SUSPICIOUS_EXTENSIONS = [
     ".js",
 ]
 
+SUSPICIOUS_TLDS = {
+    "xyz",
+    "top",
+    "click",
+    "work",
+    "shop",
+    "info",
+    "support",
+    "live",
+    "buzz",
+}
+
 IPV4_PATTERN = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}$")
+HEX_LIKE_PATTERN = re.compile(r"[a-f0-9]{12,}")
 
 
 def safe_lower(value: Any) -> str:
@@ -109,6 +157,10 @@ def count_special_chars(text: str) -> int:
     return sum(1 for ch in text if not ch.isalnum())
 
 
+def count_char(text: str, ch: str) -> int:
+    return safe_lower(text).count(ch)
+
+
 def keyword_hit_count(text: str, keywords: List[str]) -> int:
     text_lower = safe_lower(text)
     return sum(1 for kw in keywords if kw in text_lower)
@@ -131,6 +183,27 @@ def subdomain_count(host: str) -> int:
     return max(len(parts) - 2, 0)
 
 
+def extract_tld(host: str) -> str:
+    host_norm = safe_lower(host)
+    parts = [p for p in host_norm.split(".") if p]
+    if len(parts) < 2:
+        return ""
+    return parts[-1]
+
+
+def query_param_count(query: str) -> int:
+    if not query:
+        return 0
+    try:
+        return len(parse_qs(query, keep_blank_values=True))
+    except Exception:
+        return 0
+
+
+def contains_hex_like_token(text: str) -> int:
+    return int(bool(HEX_LIKE_PATTERN.search(safe_lower(text))))
+
+
 def build_feature_row(host: str, path: str) -> Dict[str, Any]:
     url = build_url(host, path)
     split = split_url(url)
@@ -139,6 +212,18 @@ def build_feature_row(host: str, path: str) -> Dict[str, Any]:
     path_value = split["path"]
     query_value = split["query"]
     full_text = f"{host_value}{path_value}?{query_value}"
+    tld = extract_tld(host_value)
+
+    host_suspicious_hits = keyword_hit_count(host_value, SUSPICIOUS_KEYWORDS)
+    path_suspicious_hits = keyword_hit_count(path_value, SUSPICIOUS_KEYWORDS)
+    query_suspicious_hits = keyword_hit_count(query_value, QUERY_SUSPICIOUS_KEYWORDS)
+    brand_hits = keyword_hit_count(host_value, BRAND_KEYWORDS) + keyword_hit_count(path_value, BRAND_KEYWORDS)
+
+    has_brand = int(brand_hits > 0)
+    has_suspicious = int(
+        host_suspicious_hits + path_suspicious_hits + query_suspicious_hits > 0
+    )
+    brand_suspicious_combo = int(has_brand and has_suspicious)
 
     return {
         "url": url,
@@ -156,10 +241,27 @@ def build_feature_row(host: str, path: str) -> Dict[str, Any]:
         "digit_count": count_digits(url),
         "special_char_count": count_special_chars(url),
         "suspicious_keyword_hits": keyword_hit_count(full_text, SUSPICIOUS_KEYWORDS),
+        "host_suspicious_keyword_hits": host_suspicious_hits,
+        "path_suspicious_keyword_hits": path_suspicious_hits,
+        "query_suspicious_keyword_hits": query_suspicious_hits,
+        "brand_keyword_hits": brand_hits,
+        "has_brand_keyword": has_brand,
+        "brand_suspicious_combo": brand_suspicious_combo,
         "has_suspicious_extension": has_suspicious_extension(path_value),
         "has_query": int(bool(query_value)),
         "is_ipv4_host": is_ipv4_host(host_value),
         "subdomain_count": subdomain_count(host_value),
+        "host_dot_count": count_char(host_value, "."),
+        "host_hyphen_count": count_char(host_value, "-"),
+        "path_hyphen_count": count_char(path_value, "-"),
+        "query_param_count": query_param_count(query_value),
+        "tld_length": len(tld),
+        "is_suspicious_tld": int(tld in SUSPICIOUS_TLDS),
+        "has_long_host": int(len(host_value) >= 25),
+        "has_many_subdomains": int(subdomain_count(host_value) >= 2),
+        "has_at_symbol": int("@" in url),
+        "double_slash_in_path": int("//" in path_value),
+        "contains_hex_like_token": contains_hex_like_token(full_text),
     }
 
 
@@ -178,6 +280,7 @@ def build_feature_dataframe(host: str, path: str) -> pd.DataFrame:
         raise RuntimeError(f"Missing feature columns: {missing_columns}")
 
     return df[feature_columns]
+
 
 def predict_score(host: str, path: str) -> Dict[str, Any]:
     model = get_loaded_model()
@@ -222,7 +325,6 @@ def predict_score(host: str, path: str) -> Dict[str, Any]:
     benign_index = classes.index("benign")
     benign_probability = float(probabilities[benign_index])
 
-    # 운영용 위험 점수
     score = 1.0 - benign_probability
 
     return {

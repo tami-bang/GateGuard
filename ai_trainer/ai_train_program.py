@@ -17,7 +17,9 @@ def build_model(config: Dict[str, Any]) -> Any:
 
     if algorithm == "logistic_regression":
         return LogisticRegression(
-            max_iter=2000,
+            max_iter=4000,
+            solver="lbfgs",
+            class_weight="balanced",
             random_state=random_state,
         )
 
