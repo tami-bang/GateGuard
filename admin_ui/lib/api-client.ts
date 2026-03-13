@@ -680,6 +680,17 @@ export async function apiPatchPolicy(policyId: number, req: PatchPolicyRequest):
   })
 }
 
+export type DeletePolicyResponse = {
+  ok: boolean
+  deleted_policy_id: number
+}
+
+export async function apiDeletePolicy(policyId: number): Promise<DeletePolicyResponse> {
+  return await httpJson<DeletePolicyResponse>(`/v1/policies/${policyId}`, {
+    method: "DELETE",
+  })
+}
+
 export async function apiCreatePolicy(req: CreatePolicyRequest): Promise<CreatePolicyResponse> {
   return await httpJson<CreatePolicyResponse>(`/v1/policies`, {
     method: "POST",

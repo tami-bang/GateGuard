@@ -14,6 +14,7 @@ import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbP
 import { ArrowLeft, Edit, Trash2, Loader2 } from "lucide-react"
 
 import {
+  apiDeletePolicy,
   apiGetPolicy,
   apiListPolicyRules,
   toBool,
@@ -44,6 +45,7 @@ export default function PolicyDetailPage() {
   const [err, setErr] = useState<string | null>(null)
   const [policy, setPolicy] = useState<Policy | null>(null)
   const [rules, setRules] = useState<PolicyRule[]>([])
+  const [deleting, setDeleting] = useState(false)
 
   useEffect(() => {
     let alive = true
@@ -78,6 +80,31 @@ export default function PolicyDetailPage() {
   }, [policyId])
 
   const enabled = useMemo(() => (policy ? toBool(policy.is_enabled) : false), [policy])
+
+  async function handleDelete() {
+    if (!policy) return
+    if (deleting) return
+
+    const ok = window.confirm(
+      `정책 "${policy.policy_name}" 을(를) 삭제하시겠습니까?\n\n이 작업은 되돌릴 수 없습니다.`
+    )
+    if (!ok) return
+
+    try {
+      setDeleting(true)
+      setErr(null)
+
+      await apiDeletePolicy(policy.policy_id)
+
+      window.alert("정책이 삭제되었습니다.")
+      router.push("/policies")
+      router.refresh()
+    } catch (e: any) {
+      window.alert(e?.message ?? "정책 삭제에 실패했습니다.")
+    } finally {
+      setDeleting(false)
+    }
+  }
 
   if (loading) {
     return (
@@ -137,8 +164,15 @@ export default function PolicyDetailPage() {
               <Edit className="size-3.5" /> Edit
             </Button>
           </Link>
-          <Button variant="outline" size="sm" className="h-8 gap-1.5 text-xs text-destructive hover:text-destructive">
-            <Trash2 className="size-3.5" /> Delete
+    	  <Button
+            variant="outline"
+            size="sm"
+            className="h-8 gap-1.5 text-xs text-destructive hover:text-destructive"
+            onClick={handleDelete}
+            disabled={deleting}
+          >
+            {deleting ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
+            {deleting ? "Deleting..." : "Delete"}
           </Button>
         </div>
       </div>
