@@ -9,10 +9,20 @@ from typing import Optional, Any, List, Dict
 import pymysql
 from fastapi import FastAPI, Header, HTTPException, Query, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from gateguard_api.ai_loader import load_artifacts_on_startup, get_model_version
 from gateguard_api.ai_manager import score_url
+from gateguard_api.alert_state import dedup_allow_send, update_component_status
+from gateguard_api.slack_alerts import (
+    send_ai_block_alert,
+    send_ai_error_summary_alert,
+    send_infra_status_alert,
+    send_platform_error_alert,
+    send_policy_change_alert,
+    send_repeat_block_alert,
+)
 
 def load_env(path: str) -> None:
     if not os.path.exists(path):
@@ -44,6 +54,14 @@ MODEL_VERSION = os.getenv("MODEL_VERSION", "urlclf-unknown")
 THRESHOLD = float(os.getenv("THRESHOLD", "0.50"))
 
 app = FastAPI(title="GateGuard AI Scoring API")
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    _safe_send_platform_error(str(request.url.path), str(exc))
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "internal server error"},
+    )
 
 @app.on_event("startup")
 def startup_event() -> None:
@@ -81,6 +99,264 @@ def db_conn():
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=True,
     )
+
+
+# =========================
+# Alert helpers
+# =========================
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
+def _alerts_dedup_window_sec() -> int:
+    return _env_int("ALERT_DEDUP_WINDOW_SEC", 300)
+
+
+def _safe_send_platform_error(endpoint: str, error_message: str) -> None:
+    try:
+        send_platform_error_alert(endpoint=endpoint, error_message=error_message)
+    except Exception:
+        pass
+
+
+def _safe_send_policy_alert(
+    *,
+    event_action: str,
+    policy_id: int,
+    changed_by: int,
+    before_snapshot: Optional[dict],
+    after_snapshot: Optional[dict],
+    change_note: Optional[str] = None,
+    source_review_id: Optional[int] = None,
+) -> None:
+    try:
+        send_policy_change_alert(
+            event_action=event_action,
+            policy_id=int(policy_id),
+            changed_by=int(changed_by),
+            before_snapshot=before_snapshot,
+            after_snapshot=after_snapshot,
+            change_note=change_note,
+            source_review_id=source_review_id,
+        )
+    except Exception:
+        pass
+
+
+def _get_system_health_snapshot() -> Dict[str, str]:
+    def check_service(service: str) -> str:
+        try:
+            result = subprocess.run(
+                ["systemctl", "is-active", service],
+                capture_output=True,
+                text=True
+            )
+            return result.stdout.strip() or "unknown"
+        except Exception:
+            return "unknown"
+
+    engine = check_service("gateguard-engine")
+    fastapi = check_service("gateguard-fastapi")
+    mariadb = check_service("mariadb")
+
+    model_dir = os.getenv(
+        "MODEL_DIR",
+        "/home/ktech/GateGuard/ai_trainer/artifacts/latest"
+    )
+    model_file = os.path.join(model_dir, "model.pkl")
+    meta_file = os.path.join(model_dir, "meta.json")
+
+    ai_model = "loaded" if os.path.exists(model_file) and os.path.exists(meta_file) else "missing"
+
+    return {
+        "engine": engine,
+        "fastapi": fastapi,
+        "mariadb": mariadb,
+        "ai_model": ai_model,
+    }
+
+
+def _dispatch_recent_ai_blocks() -> int:
+    sent_count = 0
+    lookback_sec = _env_int("ALERT_AI_BLOCK_LOOKBACK_SEC", 120)
+    latest_ai_join_sql = """
+    LEFT JOIN (
+      SELECT x.*
+      FROM ai_analysis x
+      JOIN (
+        SELECT log_id, MAX(analysis_seq) AS max_seq
+        FROM ai_analysis
+        GROUP BY log_id
+      ) m ON m.log_id = x.log_id AND m.max_seq = x.analysis_seq
+    ) aa ON aa.log_id = al.log_id
+    """
+
+    sql = f"""
+    SELECT
+      al.log_id,
+      al.request_id,
+      DATE_FORMAT(al.detect_timestamp, '%%Y-%%m-%%d %%H:%%i:%%s') AS detected_at,
+      al.client_ip,
+      al.host,
+      al.path,
+      aa.score AS ai_score,
+      aa.label AS ai_label,
+      aa.model_version AS ai_model_version
+    FROM access_log al
+    {latest_ai_join_sql}
+    WHERE al.detect_timestamp >= (NOW() - INTERVAL %s SECOND)
+      AND al.decision='BLOCK'
+      AND al.decision_stage='AI_STAGE'
+      AND {_security_event_filter_sql("al")}
+    ORDER BY al.detect_timestamp DESC, al.log_id DESC
+    """
+
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (int(lookback_sec),))
+            rows = cur.fetchall() or []
+
+    for row in rows:
+        log_id = int(row["log_id"])
+        dedup_key = f"ai_block:{log_id}"
+        if not dedup_allow_send(dedup_key, _alerts_dedup_window_sec()):
+            continue
+
+        ok = send_ai_block_alert(
+            log_id=log_id,
+            detected_at=row.get("detected_at") or _now_str(),
+            client_ip=row.get("client_ip") or "",
+            host=row.get("host") or "",
+            path=row.get("path") or "/",
+            score=row.get("ai_score"),
+            label=row.get("ai_label"),
+            model_version=row.get("ai_model_version"),
+            request_id=row.get("request_id"),
+        )
+        if ok:
+            sent_count += 1
+
+    return sent_count
+
+
+def _dispatch_repeat_blocked_clients() -> int:
+    sent_count = 0
+    threshold = _env_int("ALERT_REPEAT_BLOCK_THRESHOLD", 5)
+    window_min = _env_int("ALERT_REPEAT_BLOCK_WINDOW_MIN", 5)
+
+    sql = f"""
+    SELECT
+      al.client_ip,
+      COUNT(*) AS cnt
+    FROM access_log al
+    WHERE al.detect_timestamp >= (NOW() - INTERVAL %s MINUTE)
+      AND al.decision='BLOCK'
+      AND al.client_ip IS NOT NULL
+      AND al.client_ip <> ''
+      AND {_security_event_filter_sql("al")}
+    GROUP BY al.client_ip
+    HAVING COUNT(*) >= %s
+    ORDER BY cnt DESC, al.client_ip ASC
+    """
+
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (int(window_min), int(threshold)))
+            rows = cur.fetchall() or []
+
+    for row in rows:
+        client_ip = str(row.get("client_ip") or "").strip()
+        if not client_ip:
+            continue
+
+        dedup_key = f"repeat_block:{client_ip}"
+        if not dedup_allow_send(dedup_key, window_min * 60):
+            continue
+
+        ok = send_repeat_block_alert(
+            client_ip=client_ip,
+            blocked_count=int(row.get("cnt") or 0),
+            window_minutes=window_min,
+        )
+        if ok:
+            sent_count += 1
+
+    return sent_count
+
+
+def _dispatch_ai_error_summary() -> int:
+    sent_count = 0
+    lookback_sec = _env_int("ALERT_AI_ERROR_LOOKBACK_SEC", 120)
+
+    sql = """
+    SELECT
+      error_code,
+      COUNT(*) AS cnt,
+      MAX(DATE_FORMAT(analyzed_at, '%%Y-%%m-%%d %%H:%%i:%%s')) AS latest_at,
+      MIN(log_id) AS example_log_id
+    FROM ai_analysis
+    WHERE analyzed_at >= (NOW() - INTERVAL %s SECOND)
+      AND error_code IS NOT NULL
+      AND error_code <> ''
+    GROUP BY error_code
+    ORDER BY cnt DESC, error_code ASC
+    """
+
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (int(lookback_sec),))
+            rows = cur.fetchall() or []
+
+    for row in rows:
+        error_code = str(row.get("error_code") or "").strip() or "UNKNOWN"
+        dedup_key = f"ai_error:{error_code}"
+        if not dedup_allow_send(dedup_key, _alerts_dedup_window_sec()):
+            continue
+
+        ok = send_ai_error_summary_alert(
+            error_code=error_code,
+            count=int(row.get("cnt") or 0),
+            latest_at=row.get("latest_at") or _now_str(),
+            example_log_id=int(row["example_log_id"]) if row.get("example_log_id") is not None else None,
+        )
+        if ok:
+            sent_count += 1
+
+    return sent_count
+
+
+def _dispatch_infra_status_changes() -> int:
+    sent_count = 0
+    snapshot = _get_system_health_snapshot()
+
+    components = {
+        "gateguard-engine": snapshot.get("engine", "unknown"),
+        "mariadb": snapshot.get("mariadb", "unknown"),
+        "ai_model": snapshot.get("ai_model", "unknown"),
+    }
+
+    for component, current_status in components.items():
+        previous_status = update_component_status(component, current_status)
+        if previous_status is None:
+            continue
+
+        dedup_key = f"infra:{component}:{current_status}"
+        if not dedup_allow_send(dedup_key, 60):
+            continue
+
+        ok = send_infra_status_alert(
+            component=component,
+            previous_status=previous_status,
+            current_status=current_status,
+        )
+        if ok:
+            sent_count += 1
+
+    return sent_count
 
 
 # =========================
@@ -674,12 +950,26 @@ def create_policy_from_review_event(review_id: int, body: Optional[CreatePolicyF
             pol = cur.fetchone()
 
         updated_ev = _get_review_event_by_id(conn, review_id)
+        after_snapshot = _snapshot_policy(conn, int(policy_id))
+        _safe_send_policy_alert(
+            event_action="CREATE",
+            policy_id=int(policy_id),
+            changed_by=int(updated_ev.get("reviewer_id") or 1),
+            before_snapshot={},
+            after_snapshot=after_snapshot,
+            change_note=f"policy created from review_event(review_id={review_id}, log_id={ev['log_id']})",
+            source_review_id=int(review_id),
+        )
         return {"policy_id": policy_id, "policy": pol, "review_event": updated_ev}
     except HTTPException:
         conn.rollback()
         raise
     except Exception as e:
         conn.rollback()
+        
+        # 예상 못한 오류 발생시 Slack 알림
+        _safe_send_platform_error(f"/v1/review-events/{review_id}/actions/create-policy [POST]", str(e))
+        
         raise HTTPException(status_code=500, detail=f"create-policy failed: {str(e)}")
     finally:
         conn.autocommit(True)
@@ -753,6 +1043,10 @@ def resolve_review_event(review_id: int, req: ResolveReviewRequest, request: Req
         raise
     except Exception as e:
         conn.rollback()
+
+        # 예상 못한 오류 발생시 Slack 알림
+        _safe_send_platform_error(f"/v1/review-events/{review_id}/resolve [POST]", str(e))
+
         raise HTTPException(status_code=500, detail=f"resolve failed: {str(e)}")
     finally:
         conn.autocommit(True)
@@ -1114,6 +1408,17 @@ def create_policy(req: PolicyCreateRequest, request: Request):
                 _insert_dynamic(cur, "policy_audit", audit_payload)
 
         conn.commit()
+
+        after_snapshot = _snapshot_policy(conn, int(policy_id))
+        _safe_send_policy_alert(
+            event_action="CREATE",
+            policy_id=int(policy_id),
+            changed_by=int(created_by),
+            before_snapshot={},
+            after_snapshot=after_snapshot,
+            change_note="policy created via API",
+        )
+
         return {"ok": True, "policy_id": int(policy_id), "policy": _get_policy_by_id(conn, int(policy_id))}
 
     except HTTPException:
@@ -1126,6 +1431,9 @@ def create_policy(req: PolicyCreateRequest, request: Request):
         # duplicate policy_name 같은 케이스를 좀 더 명확하게
         if "Duplicate" in msg or "duplicate" in msg:
             raise HTTPException(status_code=409, detail=f"create policy failed: {msg}")
+        
+         # 예상 못한 서버 오류만 Slack 알림
+        _safe_send_platform_error("/v1/policies [POST]", msg)
 
         raise HTTPException(status_code=500, detail=f"create policy failed: {msg}")
     finally:
@@ -1246,12 +1554,26 @@ def patch_policy(policy_id: int, req: PolicyPatchRequest, request: Request):
                 _insert_dynamic(cur, "policy_audit", audit_payload)
 
         conn.commit()
+        
+        _safe_send_policy_alert(
+            event_action="UPDATE",
+            policy_id=int(policy_id),
+            changed_by=int(changed_by),
+            before_snapshot=before_snapshot,
+            after_snapshot=after_snapshot,
+            change_note=f"policy patched via API: fields={list(payload.keys())}",
+        )
+
         return {"ok": True, "policy": _get_policy_by_id(conn, int(policy_id))}
     except HTTPException:
         conn.rollback()
         raise
     except Exception as e:
         conn.rollback()
+        
+        # 예상 못한 에러 오류 Slack 알림
+        _safe_send_platform_error(f"/v1/policies/{policy_id} [PATCH]", str(e))
+
         raise HTTPException(status_code=500, detail=f"patch policy failed: {str(e)}")
     finally:
         try:
@@ -1312,13 +1634,24 @@ def create_policy_rule(policy_id: int, req: PolicyRuleCreateRequest, request: Re
             )
 
             conn.commit()
-
+            _safe_send_policy_alert(
+                event_action="RULE_CREATE",
+                policy_id=int(policy_id),
+                changed_by=int(user_id),
+                before_snapshot=before_obj,
+                after_snapshot=after_obj,
+                change_note=f"policy_rule CREATE rule_id={rule_id}",
+            )
         return {"ok": True, "rule_id": rule_id, "policy_id": int(policy_id)}
     except HTTPException:
         conn.rollback()
         raise
     except Exception as e:
         conn.rollback()
+
+        # 예상 못한 에러 Slack 알림
+        _safe_send_platform_error(f"/v1/policies/{policy_id}/rules [POST]", str(e))
+
         raise HTTPException(status_code=500, detail=f"create rule failed: {str(e)}")
     finally:
         conn.autocommit(True)
@@ -1369,6 +1702,14 @@ def patch_policy_rule(rule_id: int, req: PolicyRulePatchRequest, request: Reques
             )
 
             conn.commit()
+            _safe_send_policy_alert(
+                event_action="RULE_UPDATE",
+                policy_id=int(policy_id),
+                changed_by=int(user_id),
+                before_snapshot=before_obj,
+                after_snapshot=after_obj,
+                change_note=f"policy_rule UPDATE rule_id={rule_id}",
+            )
 
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM policy_rule WHERE rule_id=%s", (int(rule_id),))
@@ -1380,6 +1721,10 @@ def patch_policy_rule(rule_id: int, req: PolicyRulePatchRequest, request: Reques
         raise
     except Exception as e:
         conn.rollback()
+
+        # 예상 못한 오류 Slack 알림
+        _safe_send_platform_error(f"/v1/policy-rules/{rule_id} [PATCH]", str(e))
+
         raise HTTPException(status_code=500, detail=f"patch rule failed: {str(e)}")
     finally:
         conn.autocommit(True)
@@ -1419,13 +1764,24 @@ def delete_policy_rule(rule_id: int, request: Request):
             )
 
             conn.commit()
-
+            _safe_send_policy_alert(
+                event_action="RULE_DELETE",
+                policy_id=int(policy_id),
+                changed_by=int(user_id),
+                before_snapshot=before_obj,
+                after_snapshot=after_obj,
+                change_note=f"policy_rule DELETE rule_id={rule_id}",
+            )
         return {"ok": True, "deleted_rule_id": int(rule_id), "policy_id": int(policy_id)}
     except HTTPException:
         conn.rollback()
         raise
     except Exception as e:
         conn.rollback()
+
+        # 예상 못한 오류 Slack 알림
+        _safe_send_platform_error(f"/v1/policy-rules/{rule_id} [DELETE]", str(e))
+
         raise HTTPException(status_code=500, detail=f"delete rule failed: {str(e)}")
     finally:
         conn.autocommit(True)
@@ -1458,6 +1814,29 @@ def health():
         "model_version": get_model_version(),
         }
 
+# dispatcher endpoint
+@app.post("/v1/alerts/dispatch")
+def dispatch_alerts(authorization: Optional[str] = Header(default=None)):
+    require_token(authorization)
+
+    result = {
+        "ai_blocks_sent": 0,
+        "repeat_blocks_sent": 0,
+        "ai_error_summaries_sent": 0,
+        "infra_status_changes_sent": 0,
+    }
+
+    try:
+        result["ai_blocks_sent"] = _dispatch_recent_ai_blocks()
+        result["repeat_blocks_sent"] = _dispatch_repeat_blocked_clients()
+        result["ai_error_summaries_sent"] = _dispatch_ai_error_summary()
+        result["infra_status_changes_sent"] = _dispatch_infra_status_changes()
+    except Exception as e:
+        _safe_send_platform_error("/v1/alerts/dispatch", str(e))
+        raise HTTPException(status_code=500, detail=f"dispatch alerts failed: {str(e)}")
+
+    result["ok"] = True
+    return result
 
 def require_token(authorization: Optional[str]) -> None:
     if not authorization:
@@ -1507,6 +1886,9 @@ def score(req: ScoreRequest, authorization: Optional[str] = Header(default=None)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
+        # platform-dev 알림 추가
+        _safe_send_platform_error("/v1/score [POST]", str(exc))
+
         raise HTTPException(status_code=500, detail=f"AI scoring failed: {exc}") from exc
 
     latency_ms = int((time.time() - start) * 1000)
@@ -1721,36 +2103,13 @@ def list_logs(
 # FastAPI Health API
 @app.get("/v1/system/health")
 def system_health():
-    def check_service(service):
-        try:
-            result = subprocess.run(
-                ["systemctl", "is-active", service],
-                capture_output=True,
-                text=True
-            )
-            return result.stdout.strip()
-        except Exception:
-            return "unknown"
-
-    engine = check_service("gateguard-engine")
-    fastapi = check_service("gateguard-fastapi")
-    mariadb = check_service("mariadb")
-
-    model_dir = os.getenv(
-        "MODEL_DIR",
-        "/home/ktech/GateGuard/ai_trainer/artifacts/latest"
-    )
-    model_file = os.path.join(model_dir, "model.pkl")
-    meta_file = os.path.join(model_dir, "meta.json")
-
-    ai_model = "loaded" if os.path.exists(model_file) and os.path.exists(meta_file) else "missing"
-
+    snapshot = _get_system_health_snapshot()
     return {
-        "engine": engine,
-        "fastapi": fastapi,
-        "mariadb": mariadb,
-        "ai_model": ai_model,
-        "model_version": get_model_version() if ai_model == "loaded" else None,
+        "engine": snapshot["engine"],
+        "fastapi": snapshot["fastapi"],
+        "mariadb": snapshot["mariadb"],
+        "ai_model": snapshot["ai_model"],
+        "model_version": get_model_version() if snapshot["ai_model"] == "loaded" else None,
     }
 
 @app.get("/v1/logs/{log_id}")
