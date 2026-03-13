@@ -274,9 +274,9 @@ export type IncidentDetailResponse = {
 export type IncidentListResponse = {
   items: ReviewEvent[]
   total: number
-  page?: number
+  page: number
   limit: number
-  offset?: number
+  offset: number
   sort?: string
   dir?: string
 }
@@ -594,24 +594,23 @@ export async function apiListIncidents(params?: {
   status?: ReviewStatus | "all"
   limit?: number
   page?: number
+  sort?: string
+  dir?: string
 }): Promise<IncidentListResponse> {
-  const qs = new URLSearchParams()
+  const page = params?.page && params.page > 0 ? params.page : 1
+  const limit = params?.limit && params.limit > 0 ? params.limit : 20
+  const offset = (page - 1) * limit
 
-  if (params?.status && params.status !== "all") {
-    qs.set("status", params.status)
-  }
+  const qs = buildQuery({
+    status: params?.status && params.status !== "all" ? params.status : undefined,
+    limit,
+    page,
+    offset,
+    sort: params?.sort,
+    dir: params?.dir,
+  })
 
-  if (params?.limit) {
-    qs.set("limit", String(params.limit))
-  }
-
-  if (params?.page) {
-    qs.set("page", String(params.page))
-  }
-
-  const suffix = qs.toString() ? `?${qs.toString()}` : ""
-
-  return await httpJson<IncidentListResponse>(`/v1/incidents${suffix}`)
+  return await httpJson<IncidentListResponse>(`/v1/incidents${qs}`)
 }
 
 export async function apiGetIncidentByLog(logId: number): Promise<GetIncidentByLogResponse> {

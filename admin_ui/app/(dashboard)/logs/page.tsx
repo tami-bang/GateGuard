@@ -342,6 +342,8 @@ function LogsPageInner() {
   const items: AccessLogItem[] = data?.items || []
   const total = data?.total ?? 0
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+  const pageStart = total === 0 ? 0 : offset + 1
+  const pageEnd = Math.min(offset + items.length, total)
 
   function handleSort(field: string) {
     if (sortField === field) {
@@ -983,28 +985,32 @@ function LogsPageInner() {
       </Card>
 
       {/* 페이지네이션 */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between border rounded-md bg-white px-4 py-3">
         <div className="text-xs text-[#6B7280]">
-          Page {page} / {totalPages} · Showing {items.length} of {total}
+          {total === 0
+            ? "No results"
+            : `Showing ${pageStart}-${pageEnd} of ${total.toLocaleString()}`}
         </div>
 
         <div className="flex items-center gap-2">
           <Button
             variant="outline"
             size="sm"
-            className="h-8 text-xs"
-            onClick={() => setPage((p) => Math.max(1, p - 1))}
             disabled={page <= 1 || loading}
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
           >
-            Prev
+            Previous
           </Button>
+
+          <span className="min-w-[88px] text-center text-xs text-[#6B7280]">
+            Page {page} / {totalPages}
+          </span>
 
           <Button
             variant="outline"
             size="sm"
-            className="h-8 text-xs"
-            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
             disabled={page >= totalPages || loading}
+            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
           >
             Next
           </Button>

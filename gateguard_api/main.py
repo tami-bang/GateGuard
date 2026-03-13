@@ -440,11 +440,15 @@ def _create_policy_from_review_tx(
 def list_review_events(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    page: Optional[int] = Query(None, ge=1),
     status: Optional[str] = None,
     log_id: Optional[int] = None,
     sort: Optional[str] = "created_at",
     dir: Optional[str] = "desc",
 ):
+    if page is not None:
+        offset = (page - 1) * limit
+
     with db_conn() as conn:
         cols = _get_table_cols(conn, "review_event")
 
@@ -483,8 +487,17 @@ def list_review_events(
             cur.execute(data_sql, params + [limit, offset])
             rows = cur.fetchall()
 
-    return {"items": rows, "total": total, "limit": limit, "offset": offset, "sort": sort, "dir": dir}
+    current_page = (offset // limit) + 1 if limit > 0 else 1
 
+    return {
+        "items": rows,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "page": current_page,
+        "sort": sort,
+        "dir": dir,
+    }
 
 @app.get("/v1/review-events/{review_id}")
 @app.get("/review-events/{review_id}")

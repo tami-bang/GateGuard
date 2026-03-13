@@ -6,9 +6,8 @@ import Link from "next/link"
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { StatusChip } from "@/components/status-chip"
-import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 
 import {
@@ -42,9 +41,8 @@ type SummaryCardItem = {
   subText: string
 }
 
-/*
-시간 포맷
-*/
+const PAGE_SIZE = 10
+
 function fmt(ts: string | null | undefined): string {
   if (!ts) return "—"
   const d = new Date(ts)
@@ -57,18 +55,12 @@ function fmt(ts: string | null | undefined): string {
   })
 }
 
-/*
-요약 카드 accent
-*/
 function getSummaryAccent(status: IncidentStatusTab): string {
   if (status === "OPEN") return "from-amber-500/90 to-orange-400/70"
   if (status === "IN_PROGRESS") return "from-blue-600/90 to-blue-400/70"
   return "from-slate-500/90 to-slate-400/70"
 }
 
-/*
-incident 행 강조
-*/
 function getIncidentRowClass(rev: ReviewEvent): string {
   const status = String(rev.status || "").toUpperCase()
 
@@ -83,10 +75,6 @@ function getIncidentRowClass(rev: ReviewEvent): string {
   return "hover:bg-slate-50"
 }
 
-/*
-제안 액션 표시용 스타일
-- StatusChip과 톤 맞추되 간단한 badge로 처리
-*/
 function getActionBadgeClass(action: string | null | undefined): string {
   const v = String(action || "").toUpperCase()
 
@@ -99,13 +87,57 @@ function getActionBadgeClass(action: string | null | undefined): string {
 }
 
 export default function IncidentsPage() {
+  const [activeTab, setActiveTab] = useState<IncidentStatusTab>("OPEN")
+  const [page, setPage] = useState(1)
+
   const [items, setItems] = useState<ReviewEvent[]>([])
+  const [total, setTotal] = useState(0)
+
+  const [summaryCounts, setSummaryCounts] = useState<Record<IncidentStatusTab, number>>({
+    OPEN: 0,
+    IN_PROGRESS: 0,
+    CLOSED: 0,
+  })
+
   const [loading, setLoading] = useState(true)
+  const [summaryLoading, setSummaryLoading] = useState(true)
   const [error, setError] = useState("")
 
-  /*
-  incident 목록 로드
-  */
+  useEffect(() => {
+    let alive = true
+
+    async function loadSummary() {
+      try {
+        setSummaryLoading(true)
+
+        const [openRes, inProgressRes, closedRes] = await Promise.all([
+          apiListIncidents({ status: "OPEN", limit: 1, page: 1 }),
+          apiListIncidents({ status: "IN_PROGRESS", limit: 1, page: 1 }),
+          apiListIncidents({ status: "CLOSED", limit: 1, page: 1 }),
+        ])
+
+        if (!alive) return
+
+        setSummaryCounts({
+          OPEN: openRes.total ?? 0,
+          IN_PROGRESS: inProgressRes.total ?? 0,
+          CLOSED: closedRes.total ?? 0,
+        })
+      } catch {
+        if (!alive) return
+      } finally {
+        if (!alive) return
+        setSummaryLoading(false)
+      }
+    }
+
+    loadSummary()
+
+    return () => {
+      alive = false
+    }
+  }, [])
+
   useEffect(() => {
     let alive = true
 
@@ -114,10 +146,18 @@ export default function IncidentsPage() {
         setLoading(true)
         setError("")
 
-        const res = await apiListIncidents({ limit: 200, page: 1 })
+        const res = await apiListIncidents({
+          status: activeTab,
+          limit: PAGE_SIZE,
+          page,
+          sort: "created_at",
+          dir: "desc",
+        })
 
         if (!alive) return
+
         setItems(res.items ?? [])
+        setTotal(res.total ?? 0)
       } catch (e: any) {
         if (!alive) return
         setError(e?.message ?? "Failed to load incidents")
@@ -132,53 +172,44 @@ export default function IncidentsPage() {
     return () => {
       alive = false
     }
-  }, [])
+  }, [activeTab, page])
 
-  /*
-  상태별 그룹
-  */
-  const grouped = useMemo(
-    () => ({
-      OPEN: items.filter((r) => r.status === "OPEN"),
-      IN_PROGRESS: items.filter((r) => r.status === "IN_PROGRESS"),
-      CLOSED: items.filter((r) => r.status === "CLOSED"),
-    }),
-    [items]
-  )
+  const totalPages = useMemo(() => {
+    return Math.max(1, Math.ceil(total / PAGE_SIZE))
+  }, [total])
 
-  /*
-  상단 summary cards
-  */
   const summaryCards = useMemo<SummaryCardItem[]>(
     () => [
       {
         label: "Open Incidents",
-        value: grouped.OPEN.length,
+        value: summaryCounts.OPEN,
         icon: AlertTriangle,
         accentClass: getSummaryAccent("OPEN"),
         subText: "Pending analyst attention",
       },
       {
         label: "In Progress",
-        value: grouped.IN_PROGRESS.length,
+        value: summaryCounts.IN_PROGRESS,
         icon: Clock3,
         accentClass: getSummaryAccent("IN_PROGRESS"),
         subText: "Being reviewed or processed",
       },
       {
         label: "Closed",
-        value: grouped.CLOSED.length,
+        value: summaryCounts.CLOSED,
         icon: CheckCircle2,
         accentClass: getSummaryAccent("CLOSED"),
         subText: "Resolved review events",
       },
     ],
-    [grouped]
+    [summaryCounts]
   )
+
+  const pageStart = total === 0 ? 0 : (page - 1) * PAGE_SIZE + 1
+  const pageEnd = Math.min(page * PAGE_SIZE, total)
 
   return (
     <div className="flex flex-col gap-4">
-      {/* breadcrumb */}
       <Breadcrumb>
         <BreadcrumbList>
           <BreadcrumbItem>
@@ -191,31 +222,29 @@ export default function IncidentsPage() {
         </BreadcrumbList>
       </Breadcrumb>
 
-      {/* 페이지 헤더 */}
       <div>
         <h1 className="text-xl font-semibold text-[#111827]">
           Incidents (Review Queue)
         </h1>
         <p className="text-sm text-[#6B7280]">
-          {loading ? "Loading incidents..." : `${items.length} total incidents`}
+          {loading
+            ? "Loading incidents..."
+            : `${activeTab.replace("_", " ")} · ${total.toLocaleString()} total`}
         </p>
       </div>
 
-      {/* 에러 표시 */}
       {error ? (
         <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
           {error}
         </div>
       ) : null}
 
-      {/* 요약 카드 */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         {summaryCards.map((item) => (
           <Card
             key={item.label}
             className="relative overflow-hidden border border-[#E5E7EB] bg-white shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md"
           >
-            {/* 상단 accent */}
             <div className={cn("h-1 w-full bg-gradient-to-r", item.accentClass)} />
 
             <CardContent className="flex flex-col gap-3 p-4">
@@ -232,7 +261,7 @@ export default function IncidentsPage() {
 
               <div className="flex flex-col gap-1">
                 <span className="text-2xl font-bold tracking-tight text-[#111827]">
-                  {item.value.toLocaleString()}
+                  {summaryLoading ? "…" : item.value.toLocaleString()}
                 </span>
                 <span className="text-[11px] text-[#9CA3AF]">{item.subText}</span>
               </div>
@@ -241,143 +270,169 @@ export default function IncidentsPage() {
         ))}
       </div>
 
-      {/* 탭 영역 */}
-      <Tabs defaultValue="OPEN">
+      <Tabs
+        value={activeTab}
+        onValueChange={(value) => {
+          setActiveTab(value as IncidentStatusTab)
+          setPage(1)
+        }}
+      >
         <TabsList>
           <TabsTrigger value="OPEN" className="gap-1.5 text-xs">
             Open
             <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
-              {grouped.OPEN.length}
+              {summaryCounts.OPEN}
             </span>
           </TabsTrigger>
 
           <TabsTrigger value="IN_PROGRESS" className="gap-1.5 text-xs">
             In Progress
             <span className="rounded-full bg-blue-100 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700">
-              {grouped.IN_PROGRESS.length}
+              {summaryCounts.IN_PROGRESS}
             </span>
           </TabsTrigger>
 
           <TabsTrigger value="CLOSED" className="gap-1.5 text-xs">
             Closed
             <span className="rounded-full bg-gray-100 px-1.5 py-0.5 text-[10px] font-semibold text-gray-600">
-              {grouped.CLOSED.length}
+              {summaryCounts.CLOSED}
             </span>
           </TabsTrigger>
         </TabsList>
 
-        {(["OPEN", "IN_PROGRESS", "CLOSED"] as const).map((status: IncidentStatusTab) => (
-          <TabsContent key={status} value={status}>
-            <Card className="overflow-hidden border border-[#E5E7EB] bg-white shadow-sm">
-              <CardContent className="p-0">
-                <Table>
-                  <TableHeader>
-                    <TableRow className="bg-[#F8FAFC]">
-                      <TableHead className="text-[11px]">Created</TableHead>
-                      <TableHead className="text-[11px]">Log ID</TableHead>
-                      <TableHead className="text-[11px]">Status</TableHead>
-                      <TableHead className="text-[11px]">Reviewer</TableHead>
-                      <TableHead className="text-[11px]">Proposed</TableHead>
-                      <TableHead className="text-[11px]">Generated Policy</TableHead>
-                      <TableHead className="text-[11px]">Actions</TableHead>
-                    </TableRow>
-                  </TableHeader>
+        <Card className="overflow-hidden border border-[#E5E7EB] bg-white shadow-sm">
+          <CardContent className="p-0">
+            <Table>
+              <TableHeader>
+                <TableRow className="bg-[#F8FAFC]">
+                  <TableHead className="text-[11px]">Created</TableHead>
+                  <TableHead className="text-[11px]">Log ID</TableHead>
+                  <TableHead className="text-[11px]">Status</TableHead>
+                  <TableHead className="text-[11px]">Reviewer</TableHead>
+                  <TableHead className="text-[11px]">Proposed</TableHead>
+                  <TableHead className="text-[11px]">Generated Policy</TableHead>
+                  <TableHead className="text-[11px]">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
 
-                  <TableBody>
-                    {loading ? (
-                      <TableRow>
-                        <TableCell colSpan={7} className="py-8 text-center text-sm text-[#6B7280]">
-                          Loading incidents...
-                        </TableCell>
-                      </TableRow>
-                    ) : grouped[status].length === 0 ? (
-                      <TableRow>
-                        <TableCell colSpan={7} className="py-8 text-center text-sm text-[#6B7280]">
-                          No incidents with status {status.replace("_", " ")}
-                        </TableCell>
-                      </TableRow>
-                    ) : (
-                      grouped[status].map((rev) => (
-                        <TableRow
-                          key={rev.review_id}
-                          className={cn("text-xs transition-colors duration-150", getIncidentRowClass(rev))}
+              <TableBody>
+                {loading ? (
+                  <TableRow>
+                    <TableCell colSpan={7} className="py-8 text-center text-sm text-[#6B7280]">
+                      Loading incidents...
+                    </TableCell>
+                  </TableRow>
+                ) : items.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={7} className="py-8 text-center text-sm text-[#6B7280]">
+                      No incidents with status {activeTab.replace("_", " ")}
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  items.map((rev) => (
+                    <TableRow
+                      key={rev.review_id}
+                      className={cn("text-xs transition-colors duration-150", getIncidentRowClass(rev))}
+                    >
+                      <TableCell className="font-mono text-[11px] text-[#6B7280]">
+                        {fmt(rev.created_at)}
+                      </TableCell>
+
+                      <TableCell>
+                        <Link
+                          href={`/logs/${rev.log_id}`}
+                          className="font-mono text-primary hover:underline"
                         >
-                          {/* 생성 시각 */}
-                          <TableCell className="font-mono text-[11px] text-[#6B7280]">
-                            {fmt(rev.created_at)}
-                          </TableCell>
+                          {rev.log_id}
+                        </Link>
+                      </TableCell>
 
-                          {/* Log ID */}
-                          <TableCell>
-                            <Link
-                              href={`/logs/${rev.log_id}`}
-                              className="font-mono text-primary hover:underline"
-                            >
-                              {rev.log_id}
-                            </Link>
-                          </TableCell>
+                      <TableCell>
+                        <StatusChip value={rev.status} type="review" size="sm" />
+                      </TableCell>
 
-                          {/* Status */}
-                          <TableCell>
-                            <StatusChip value={rev.status} type="review" size="sm" />
-                          </TableCell>
+                      <TableCell className="text-[11px] text-[#6B7280]">
+                        {rev.reviewer_id ?? "—"}
+                      </TableCell>
 
-                          {/* Reviewer */}
-                          <TableCell className="text-[11px] text-[#6B7280]">
-                            {rev.reviewer_id ?? "—"}
-                          </TableCell>
-
-                          {/* Proposed action */}
-                          <TableCell>
-                            {rev.proposed_action ? (
-                              <span
-                                className={cn(
-                                  "inline-flex items-center rounded-md border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
-                                  getActionBadgeClass(rev.proposed_action)
-                                )}
-                              >
-                                {rev.proposed_action.replace(/_/g, " ")}
-                              </span>
-                            ) : (
-                              <span className="text-[11px] text-[#6B7280]">—</span>
+                      <TableCell>
+                        {rev.proposed_action ? (
+                          <span
+                            className={cn(
+                              "inline-flex items-center rounded-md border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
+                              getActionBadgeClass(rev.proposed_action)
                             )}
-                          </TableCell>
+                          >
+                            {rev.proposed_action.replace(/_/g, " ")}
+                          </span>
+                        ) : (
+                          <span className="text-[11px] text-[#6B7280]">—</span>
+                        )}
+                      </TableCell>
 
-                          {/* 생성된 정책 */}
-                          <TableCell className="text-[11px]">
-                            {rev.generated_policy_id ? (
-                              <Link
-                                href={`/policies/${rev.generated_policy_id}`}
-                                className="font-mono text-primary hover:underline"
-                              >
-                                {rev.generated_policy_id}
-                              </Link>
-                            ) : (
-                              "—"
-                            )}
-                          </TableCell>
+                      <TableCell className="text-[11px]">
+                        {rev.generated_policy_id ? (
+                          <Link
+                            href={`/policies/${rev.generated_policy_id}`}
+                            className="font-mono text-primary hover:underline"
+                          >
+                            {rev.generated_policy_id}
+                          </Link>
+                        ) : (
+                          "—"
+                        )}
+                      </TableCell>
 
-                          {/* 상세 이동 */}
-                          <TableCell>
-                            <Link href={`/incidents/${rev.review_id}`}>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="h-7 px-2 text-xs text-[#1E3A8A] transition-colors hover:bg-slate-100 hover:text-[#2563EB]"
-                              >
-                                Detail
-                              </Button>
-                            </Link>
-                          </TableCell>
-                        </TableRow>
-                      ))
-                    )}
-                  </TableBody>
-                </Table>
-              </CardContent>
-            </Card>
-          </TabsContent>
-        ))}
+                      <TableCell>
+                        <Link href={`/incidents/${rev.review_id}`}>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 px-2 text-xs text-[#1E3A8A] transition-colors hover:bg-slate-100 hover:text-[#2563EB]"
+                          >
+                            Detail
+                          </Button>
+                        </Link>
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+
+            <div className="flex items-center justify-between border-t bg-white px-4 py-3">
+              <div className="text-xs text-[#6B7280]">
+                {total === 0
+                  ? "No results"
+                  : `Showing ${pageStart}-${pageEnd} of ${total.toLocaleString()}`}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={page <= 1 || loading}
+                  onClick={() => setPage((prev) => Math.max(1, prev - 1))}
+                >
+                  Previous
+                </Button>
+
+                <span className="min-w-[88px] text-center text-xs text-[#6B7280]">
+                  Page {page} / {totalPages}
+                </span>
+
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={page >= totalPages || loading}
+                  onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}
+                >
+                  Next
+                </Button>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
       </Tabs>
     </div>
   )

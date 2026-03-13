@@ -28,6 +28,8 @@ import {
   type PolicyAuditItem,
 } from "@/lib/api-client"
 
+const PAGE_SIZE = 10
+
 const actionColors: Record<string, string> = {
   CREATE: "bg-emerald-50 text-emerald-700 border-emerald-200",
   UPDATE: "bg-blue-50 text-blue-700 border-blue-200",
@@ -98,7 +100,11 @@ function buildDiffRows(beforeObj: Record<string, any> | null, afterObj: Record<s
 }
 
 export default function AuditLogPage() {
+  const [page, setPage] = useState(1)
+
   const [items, setItems] = useState<PolicyAuditItem[]>([])
+  const [total, setTotal] = useState(0)
+
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
   const [selectedAudit, setSelectedAudit] = useState<PolicyAuditItem | null>(null)
@@ -111,15 +117,18 @@ export default function AuditLogPage() {
         setLoading(true)
         setError("")
 
+        const offset = (page - 1) * PAGE_SIZE
+
         const res = await apiListPolicyAudits({
-          limit: 200,
-          offset: 0,
+          limit: PAGE_SIZE,
+          offset,
           sort: "changed_at",
           dir: "desc",
         })
 
         if (!alive) return
         setItems(res.items ?? [])
+        setTotal(res.total ?? 0)
       } catch (e: any) {
         if (!alive) return
         setError(e?.message ?? "Failed to load audit logs")
@@ -134,7 +143,7 @@ export default function AuditLogPage() {
     return () => {
       alive = false
     }
-  }, [])
+  }, [page])
 
   const selectedBefore = useMemo(
     () => parseSnapshot(selectedAudit?.before_snapshot),
@@ -150,6 +159,10 @@ export default function AuditLogPage() {
     () => buildDiffRows(selectedBefore, selectedAfter),
     [selectedBefore, selectedAfter]
   )
+
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+  const pageStart = total === 0 ? 0 : (page - 1) * PAGE_SIZE + 1
+  const pageEnd = Math.min(page * PAGE_SIZE, total)
 
   return (
     <div className="flex flex-col gap-4">
@@ -168,7 +181,7 @@ export default function AuditLogPage() {
       <div>
         <h1 className="text-xl font-semibold text-foreground">Audit Log</h1>
         <p className="text-sm text-muted-foreground">
-          {loading ? "Loading policy audit history..." : "Policy change history"}
+          {loading ? "Loading policy audit history..." : `${total.toLocaleString()} total audit records`}
         </p>
       </div>
 
@@ -268,6 +281,38 @@ export default function AuditLogPage() {
             )}
           </TableBody>
         </Table>
+
+        <div className="flex items-center justify-between border-t bg-white px-4 py-3">
+          <div className="text-xs text-muted-foreground">
+            {total === 0
+              ? "No results"
+              : `Showing ${pageStart}-${pageEnd} of ${total.toLocaleString()}`}
+          </div>
+
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={page <= 1 || loading}
+              onClick={() => setPage((prev) => Math.max(1, prev - 1))}
+            >
+              Previous
+            </Button>
+
+            <span className="min-w-[88px] text-center text-xs text-muted-foreground">
+              Page {page} / {totalPages}
+            </span>
+
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={page >= totalPages || loading}
+              onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}
+            >
+              Next
+            </Button>
+          </div>
+        </div>
       </Card>
 
       <Sheet open={!!selectedAudit} onOpenChange={() => setSelectedAudit(null)}>

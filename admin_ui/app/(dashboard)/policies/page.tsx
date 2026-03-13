@@ -1,16 +1,28 @@
 "use client"
 
-import { useEffect, useState, useMemo } from "react"
+import { useEffect, useMemo, useState } from "react"
 import Link from "next/link"
+
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
 import { StatusChip } from "@/components/status-chip"
-import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from "@/components/ui/breadcrumb"
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbLink,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb"
+
 import { Plus, X } from "lucide-react"
+
 import { apiListPolicies, type Policy, toBool } from "@/lib/api-client"
+
+const PAGE_SIZE = 10
 
 const riskColors: Record<string, string> = {
   CRITICAL: "bg-red-50 text-red-700 border-red-200",
@@ -34,9 +46,15 @@ export default function PoliciesPage() {
     riskLevel: "all",
   })
 
+  const [page, setPage] = useState(1)
+
   const [policies, setPolicies] = useState<Policy[]>([])
+  const [total, setTotal] = useState(0)
+
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  const offset = (page - 1) * PAGE_SIZE
 
   useEffect(() => {
     let cancelled = false
@@ -47,18 +65,20 @@ export default function PoliciesPage() {
         setError(null)
 
         const res = await apiListPolicies({
-          limit: 100,
-          offset: 0,
+          limit: PAGE_SIZE,
+          offset,
           sort: "created_at",
           dir: "desc",
         })
 
         if (!cancelled) {
           setPolicies(Array.isArray(res.items) ? res.items : [])
+          setTotal(typeof res.total === "number" ? res.total : 0)
         }
       } catch (err) {
         if (!cancelled) {
           setPolicies([])
+          setTotal(0)
           setError(err instanceof Error ? err.message : "Failed to load policies")
         }
       } finally {
@@ -73,7 +93,7 @@ export default function PoliciesPage() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [offset])
 
   const filtered = useMemo(() => {
     let rows = [...policies]
@@ -102,6 +122,16 @@ export default function PoliciesPage() {
     })
   }, [policies, filters])
 
+  const activeFilterCount =
+    (filters.type !== "all" ? 1 : 0) +
+    (filters.action !== "all" ? 1 : 0) +
+    (filters.enabled !== "all" ? 1 : 0) +
+    (filters.riskLevel !== "all" ? 1 : 0)
+
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+  const pageStart = total === 0 ? 0 : offset + 1
+  const pageEnd = Math.min(offset + policies.length, total)
+
   function clearFilters() {
     setFilters({
       type: "all",
@@ -109,6 +139,15 @@ export default function PoliciesPage() {
       enabled: "all",
       riskLevel: "all",
     })
+    setPage(1)
+  }
+
+  function updateFilter(key: "type" | "action" | "enabled" | "riskLevel", value: string) {
+    setFilters((prev) => ({
+      ...prev,
+      [key]: value,
+    }))
+    setPage(1)
   }
 
   return (
@@ -129,7 +168,7 @@ export default function PoliciesPage() {
         <div>
           <h1 className="text-xl font-semibold text-foreground">Policies</h1>
           <p className="text-sm text-muted-foreground">
-            {loading ? "Loading..." : `${filtered.length} policies`}
+            {loading ? "Loading..." : `${total.toLocaleString()} total policies`}
           </p>
         </div>
 
@@ -147,7 +186,7 @@ export default function PoliciesPage() {
             <label className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">
               Type
             </label>
-            <Select value={filters.type} onValueChange={(v) => setFilters((f) => ({ ...f, type: v }))}>
+            <Select value={filters.type} onValueChange={(v) => updateFilter("type", v)}>
               <SelectTrigger className="h-8 w-[130px] text-xs">
                 <SelectValue />
               </SelectTrigger>
@@ -164,7 +203,7 @@ export default function PoliciesPage() {
             <label className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">
               Action
             </label>
-            <Select value={filters.action} onValueChange={(v) => setFilters((f) => ({ ...f, action: v }))}>
+            <Select value={filters.action} onValueChange={(v) => updateFilter("action", v)}>
               <SelectTrigger className="h-8 w-[120px] text-xs">
                 <SelectValue />
               </SelectTrigger>
@@ -182,7 +221,7 @@ export default function PoliciesPage() {
             <label className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">
               Enabled
             </label>
-            <Select value={filters.enabled} onValueChange={(v) => setFilters((f) => ({ ...f, enabled: v }))}>
+            <Select value={filters.enabled} onValueChange={(v) => updateFilter("enabled", v)}>
               <SelectTrigger className="h-8 w-[110px] text-xs">
                 <SelectValue />
               </SelectTrigger>
@@ -198,10 +237,7 @@ export default function PoliciesPage() {
             <label className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">
               Risk
             </label>
-            <Select
-              value={filters.riskLevel}
-              onValueChange={(v) => setFilters((f) => ({ ...f, riskLevel: v }))}
-            >
+            <Select value={filters.riskLevel} onValueChange={(v) => updateFilter("riskLevel", v)}>
               <SelectTrigger className="h-8 w-[120px] text-xs">
                 <SelectValue />
               </SelectTrigger>
@@ -215,10 +251,21 @@ export default function PoliciesPage() {
             </Select>
           </div>
 
-          <Button variant="ghost" size="sm" className="h-8 text-xs text-muted-foreground" onClick={clearFilters}>
-            <X className="mr-1 size-3" />
-            Clear
-          </Button>
+          <div className="ml-auto flex items-center gap-2">
+            <div className="text-xs text-muted-foreground">
+              {activeFilterCount > 0 ? `${activeFilterCount} filter(s)` : "No filters"}
+            </div>
+
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 text-xs text-muted-foreground"
+              onClick={clearFilters}
+            >
+              <X className="mr-1 size-3" />
+              Clear
+            </Button>
+          </div>
         </CardContent>
       </Card>
 
@@ -226,103 +273,137 @@ export default function PoliciesPage() {
         {error ? (
           <div className="p-4 text-sm text-red-600">{error}</div>
         ) : (
-          <Table>
-            <TableHeader>
-              <TableRow className="bg-muted/50">
-                <TableHead className="text-[11px]">ID</TableHead>
-                <TableHead className="text-[11px]">Name</TableHead>
-                <TableHead className="text-[11px]">Type</TableHead>
-                <TableHead className="text-[11px]">Action</TableHead>
-                <TableHead className="text-[11px]">Priority</TableHead>
-                <TableHead className="text-[11px]">Risk</TableHead>
-                <TableHead className="text-[11px]">Category</TableHead>
-                <TableHead className="text-[11px]">Status</TableHead>
-                <TableHead className="text-[11px]">Updated</TableHead>
-                <TableHead className="text-[11px]">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-
-            <TableBody>
-              {!loading && filtered.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={10} className="py-8 text-center text-xs text-muted-foreground">
-                    No policies found
-                  </TableCell>
+          <>
+            <Table>
+              <TableHeader>
+                <TableRow className="bg-muted/50">
+                  <TableHead className="text-[11px]">ID</TableHead>
+                  <TableHead className="text-[11px]">Name</TableHead>
+                  <TableHead className="text-[11px]">Type</TableHead>
+                  <TableHead className="text-[11px]">Action</TableHead>
+                  <TableHead className="text-[11px]">Priority</TableHead>
+                  <TableHead className="text-[11px]">Risk</TableHead>
+                  <TableHead className="text-[11px]">Category</TableHead>
+                  <TableHead className="text-[11px]">Status</TableHead>
+                  <TableHead className="text-[11px]">Updated</TableHead>
+                  <TableHead className="text-[11px]">Actions</TableHead>
                 </TableRow>
-              ) : (
-                filtered.map((p) => (
-                  <TableRow key={p.policy_id} className="text-xs">
-                    <TableCell className="font-mono text-[11px] text-muted-foreground">
-                      {p.policy_id}
-                    </TableCell>
+              </TableHeader>
 
-                    <TableCell className="max-w-[220px] truncate font-medium text-foreground">
-                      {p.policy_name}
-                    </TableCell>
-
-                    <TableCell>
-                      <StatusChip value={p.policy_type} type="policyType" />
-                    </TableCell>
-
-                    <TableCell>
-                      <StatusChip value={p.action} />
-                    </TableCell>
-
-                    <TableCell className="font-mono text-[11px]">
-                      {p.priority ?? "-"}
-                    </TableCell>
-
-                    <TableCell>
-                      {p.risk_level ? (
-                        <span
-                          className={`inline-flex rounded border px-1.5 py-0.5 text-[11px] font-semibold ${
-                            riskColors[p.risk_level] || ""
-                          }`}
-                        >
-                          {p.risk_level}
-                        </span>
-                      ) : (
-                        <span className="text-[11px] text-muted-foreground">-</span>
-                      )}
-                    </TableCell>
-
-                    <TableCell className="text-[11px] text-muted-foreground">
-                      {p.category || "-"}
-                    </TableCell>
-
-                    <TableCell>
-                      <Badge
-                        variant={toBool(p.is_enabled) ? "default" : "secondary"}
-                        className={`text-[10px] ${toBool(p.is_enabled) ? "bg-success text-white border-0" : ""}`}
-                      >
-                        {toBool(p.is_enabled) ? "Enabled" : "Disabled"}
-                      </Badge>
-                    </TableCell>
-
-                    <TableCell className="font-mono text-[11px] text-muted-foreground">
-                      {formatDate(p.updated_at)}
-                    </TableCell>
-
-                    <TableCell>
-                      <div className="flex items-center gap-1">
-                        <Link href={`/policies/${p.policy_id}`}>
-                          <Button variant="ghost" size="sm" className="h-6 px-2 text-xs text-primary">
-                            View
-                          </Button>
-                        </Link>
-
-                        <Link href={`/policies/${p.policy_id}/edit`}>
-                          <Button variant="ghost" size="sm" className="h-6 px-2 text-xs text-muted-foreground">
-                            Edit
-                          </Button>
-                        </Link>
-                      </div>
+              <TableBody>
+                {!loading && filtered.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={10} className="py-8 text-center text-xs text-muted-foreground">
+                      No policies found
                     </TableCell>
                   </TableRow>
-                ))
-              )}
-            </TableBody>
-          </Table>
+                ) : (
+                  filtered.map((p) => (
+                    <TableRow key={p.policy_id} className="text-xs">
+                      <TableCell className="font-mono text-[11px] text-muted-foreground">
+                        {p.policy_id}
+                      </TableCell>
+
+                      <TableCell className="max-w-[220px] truncate font-medium text-foreground">
+                        {p.policy_name}
+                      </TableCell>
+
+                      <TableCell>
+                        <StatusChip value={p.policy_type} type="policyType" />
+                      </TableCell>
+
+                      <TableCell>
+                        <StatusChip value={p.action} />
+                      </TableCell>
+
+                      <TableCell className="font-mono text-[11px]">
+                        {p.priority ?? "-"}
+                      </TableCell>
+
+                      <TableCell>
+                        {p.risk_level ? (
+                          <span
+                            className={`inline-flex rounded border px-1.5 py-0.5 text-[11px] font-semibold ${
+                              riskColors[p.risk_level] || ""
+                            }`}
+                          >
+                            {p.risk_level}
+                          </span>
+                        ) : (
+                          <span className="text-[11px] text-muted-foreground">-</span>
+                        )}
+                      </TableCell>
+
+                      <TableCell className="text-[11px] text-muted-foreground">
+                        {p.category || "-"}
+                      </TableCell>
+
+                      <TableCell>
+                        <Badge
+                          variant={toBool(p.is_enabled) ? "default" : "secondary"}
+                          className={`text-[10px] ${toBool(p.is_enabled) ? "bg-success text-white border-0" : ""}`}
+                        >
+                          {toBool(p.is_enabled) ? "Enabled" : "Disabled"}
+                        </Badge>
+                      </TableCell>
+
+                      <TableCell className="font-mono text-[11px] text-muted-foreground">
+                        {formatDate(p.updated_at)}
+                      </TableCell>
+
+                      <TableCell>
+                        <div className="flex items-center gap-1">
+                          <Link href={`/policies/${p.policy_id}`}>
+                            <Button variant="ghost" size="sm" className="h-6 px-2 text-xs text-primary">
+                              View
+                            </Button>
+                          </Link>
+
+                          <Link href={`/policies/${p.policy_id}/edit`}>
+                            <Button variant="ghost" size="sm" className="h-6 px-2 text-xs text-muted-foreground">
+                              Edit
+                            </Button>
+                          </Link>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+
+            <div className="flex items-center justify-between border-t bg-white px-4 py-3">
+              <div className="text-xs text-muted-foreground">
+                {total === 0
+                  ? "No results"
+                  : `Showing ${pageStart}-${pageEnd} of ${total.toLocaleString()}`}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={page <= 1 || loading}
+                  onClick={() => setPage((prev) => Math.max(1, prev - 1))}
+                >
+                  Previous
+                </Button>
+
+                <span className="min-w-[88px] text-center text-xs text-muted-foreground">
+                  Page {page} / {totalPages}
+                </span>
+
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={page >= totalPages || loading}
+                  onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}
+                >
+                  Next
+                </Button>
+              </div>
+            </div>
+          </>
         )}
       </Card>
     </div>
