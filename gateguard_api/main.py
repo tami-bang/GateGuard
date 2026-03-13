@@ -1272,6 +1272,30 @@ def list_policy_audits(
         "dir": dir,
     }
 
+@app.get("/v1/policy-audits/{audit_id}")
+@app.get("/policy-audits/{audit_id}")
+def get_policy_audit(audit_id: int):
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                  pa.*,
+                  p.policy_name
+                FROM policy_audit pa
+                LEFT JOIN policy p
+                  ON p.policy_id = pa.policy_id
+                WHERE pa.audit_id=%s
+                """,
+                (int(audit_id),),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="policy audit not found")
+
+    return row
+
 @app.get("/v1/policies")
 @app.get("/policies")
 def list_policies(

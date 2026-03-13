@@ -731,6 +731,10 @@ export async function apiListPolicyAudits(params?: {
   return await httpJson<ListPolicyAuditsResponse>(`/v1/policy-audits${qs}`)
 }
 
+export async function apiGetPolicyAudit(auditId: number): Promise<PolicyAuditItem> {
+  return await httpJson<PolicyAuditItem>(`/v1/policy-audits/${auditId}`)
+}
+
 /* =========================
 boolean 정규화
 ========================= */
