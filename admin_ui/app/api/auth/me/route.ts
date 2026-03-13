@@ -2,6 +2,8 @@ export const runtime = "nodejs"
 
 import { NextResponse } from "next/server"
 import { cookies } from "next/headers"
+
+import { findUserById } from "@/lib/auth-db"
 import { SESSION_COOKIE_NAME, verifySessionCookie } from "@/lib/session"
 
 export async function GET() {
@@ -13,6 +15,11 @@ export async function GET() {
     return NextResponse.json({ ok: false }, { status: 401 })
   }
 
+  const dbUser = await findUserById(Number(payload.sub))
+  if (!dbUser || Number(dbUser.is_active) !== 1) {
+    return NextResponse.json({ ok: false }, { status: 401 })
+  }
+
   return NextResponse.json({
     ok: true,
     user: {
@@ -20,6 +27,7 @@ export async function GET() {
       email: payload.email,
       name: payload.name,
       role: payload.role,
+      twoFactorEnabled: Number(dbUser.two_factor_enabled) === 1,
     },
   })
 }

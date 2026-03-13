@@ -5,8 +5,30 @@ export type SessionUser = {
   role: "Admin" | "Operator" | "Engineer"
 }
 
+type SessionPayload = {
+  sub: string
+  email: string
+  name: string
+  role: string
+  iat: number
+  exp: number
+}
+
+type PendingTwoFactorPayload = {
+  sub: string
+  email: string
+  name: string
+  role: string
+  iat: number
+  exp: number
+  purpose: "2fa_pending"
+}
+
 const COOKIE_NAME = "gg_session"
-const DEFAULT_MAX_AGE_SEC = 60 * 60 * 8 // 8 hours
+const PENDING_2FA_COOKIE_NAME = "gg_2fa_pending"
+
+const DEFAULT_MAX_AGE_SEC = 60 * 60 * 8
+const DEFAULT_PENDING_2FA_MAX_AGE_SEC = 60 * 5
 
 function getSecret(): string {
   return process.env.GG_SESSION_SECRET || "dev-secret-change-me"
@@ -41,36 +63,25 @@ async function hmacSha256Base64url(secret: string, data: string): Promise<string
   return base64urlFromBytes(new Uint8Array(sig))
 }
 
-export async function buildSessionCookie(user: SessionUser, maxAgeSec = DEFAULT_MAX_AGE_SEC) {
-  const now = Math.floor(Date.now() / 1000)
-  const payload = {
-    sub: user.id,
-    email: user.email,
-    name: user.name,
-    role: user.role,
-    iat: now,
-    exp: now + maxAgeSec,
-  }
-
+async function buildSignedCookie(
+  cookieName: string,
+  payload: Record<string, any>,
+  maxAgeSec: number
+) {
   const body = base64urlFromBytes(new TextEncoder().encode(JSON.stringify(payload)))
   const sig = await hmacSha256Base64url(getSecret(), body)
   const token = `${body}.${sig}`
 
   return {
-    name: COOKIE_NAME,
+    name: cookieName,
     value: token,
     maxAge: maxAgeSec,
   }
 }
 
-export function clearSessionCookie() {
-  return { name: COOKIE_NAME, value: "", maxAge: 0 }
-}
-
-export async function verifySessionCookie(
-  token: string | undefined | null
-): Promise<null | { sub: string; email: string; name: string; role: string; iat: number; exp: number }> {
+async function verifySignedToken<T>(token: string | undefined | null): Promise<T | null> {
   if (!token) return null
+
   const parts = token.split(".")
   if (parts.length !== 2) return null
 
@@ -83,11 +94,68 @@ export async function verifySessionCookie(
     const payload = JSON.parse(json)
     const now = Math.floor(Date.now() / 1000)
     if (!payload?.exp || now >= payload.exp) return null
-    return payload
+    return payload as T
   } catch {
     return null
   }
 }
 
+export async function buildSessionCookie(user: SessionUser, maxAgeSec = DEFAULT_MAX_AGE_SEC) {
+  const now = Math.floor(Date.now() / 1000)
+  const payload: SessionPayload = {
+    sub: user.id,
+    email: user.email,
+    name: user.name,
+    role: user.role,
+    iat: now,
+    exp: now + maxAgeSec,
+  }
+
+  return await buildSignedCookie(COOKIE_NAME, payload, maxAgeSec)
+}
+
+export async function buildPendingTwoFactorCookie(
+  user: SessionUser,
+  maxAgeSec = DEFAULT_PENDING_2FA_MAX_AGE_SEC
+) {
+  const now = Math.floor(Date.now() / 1000)
+  const payload: PendingTwoFactorPayload = {
+    sub: user.id,
+    email: user.email,
+    name: user.name,
+    role: user.role,
+    purpose: "2fa_pending",
+    iat: now,
+    exp: now + maxAgeSec,
+  }
+
+  return await buildSignedCookie(PENDING_2FA_COOKIE_NAME, payload, maxAgeSec)
+}
+
+export function clearSessionCookie() {
+  return { name: COOKIE_NAME, value: "", maxAge: 0 }
+}
+
+export function clearPendingTwoFactorCookie() {
+  return { name: PENDING_2FA_COOKIE_NAME, value: "", maxAge: 0 }
+}
+
+export async function verifySessionCookie(
+  token: string | undefined | null
+): Promise<SessionPayload | null> {
+  return await verifySignedToken<SessionPayload>(token)
+}
+
+export async function verifyPendingTwoFactorCookie(
+  token: string | undefined | null
+): Promise<PendingTwoFactorPayload | null> {
+  const payload = await verifySignedToken<PendingTwoFactorPayload>(token)
+  if (!payload) return null
+  if (payload.purpose !== "2fa_pending") return null
+  return payload
+}
+
 export const SESSION_COOKIE_NAME = COOKIE_NAME
 export const SESSION_MAX_AGE_SEC = DEFAULT_MAX_AGE_SEC
+export const PENDING_2FA_MAX_AGE_SEC = DEFAULT_PENDING_2FA_MAX_AGE_SEC
+export const PENDING_2FA_COOKIE_NAME_EXPORT = PENDING_2FA_COOKIE_NAME

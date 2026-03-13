@@ -10,9 +10,9 @@ import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
 
 import { useAuth } from "@/lib/auth-context"
-import { mockUsers } from "@/lib/mock-data"
 
 type Mode = "login" | "forgot" | "reset"
+type LoginStage = "credentials" | "otp"
 
 function safeDecodeRepeated(v: string, maxRounds: number): string {
   let cur = v
@@ -31,10 +31,8 @@ function safeDecodeRepeated(v: string, maxRounds: number): string {
 function sanitizeNext(nextRaw: string | null): { raw: string | null; decoded: string | null; path: string | null } {
   if (!nextRaw) return { raw: null, decoded: null, path: null }
 
-  // next가 "%2Fpolicies%2F8" 혹은 "%252Fpolicies%252F8"(이중 인코딩)로 올 수 있어 반복 디코딩
   const decoded = safeDecodeRepeated(nextRaw, 3).trim()
 
-  // 오픈 리다이렉트 방지: 같은 사이트 내 상대경로만 허용
   if (!decoded.startsWith("/")) return { raw: nextRaw, decoded, path: null }
   if (decoded.startsWith("//")) return { raw: nextRaw, decoded, path: null }
   if (decoded.includes("\\")) return { raw: nextRaw, decoded, path: null }
@@ -53,23 +51,24 @@ export default function LoginClient() {
 
   const nextPath = nextInfo.path
 
-  const { login, isAuthenticated, bootstrapped } = useAuth()
+  const { isAuthenticated, bootstrapped } = useAuth()
 
   const [mode, setMode] = useState<Mode>("login")
+  const [stage, setStage] = useState<LoginStage>("credentials")
+
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
+  const [otp, setOtp] = useState("")
+
   const [error, setError] = useState("")
-  const [fieldErrors, setFieldErrors] = useState<{ email?: string; password?: string }>({})
+  const [fieldErrors, setFieldErrors] = useState<{ email?: string; password?: string; otp?: string }>({})
   const [submitting, setSubmitting] = useState(false)
 
   function gotoAfterLogin() {
     const target = nextPath ?? "/dashboard"
 
-    // 1) SPA 라우팅 시도
     router.replace(target)
 
-    // 2) 미들웨어/세션/프록시 환경에서 SPA replace가 먹통이거나 다시 튕기는 케이스 대비:
-    //    300ms 후에도 경로가 안 바뀌면 하드 네비게이션으로 강제 이동
     if (typeof window !== "undefined") {
       window.setTimeout(() => {
         try {
@@ -83,9 +82,6 @@ export default function LoginClient() {
     }
   }
 
-  /**
-   * 이미 로그인 상태라면 "/"에서만 redirect 수행
-   */
   useEffect(() => {
     if (!bootstrapped) return
     if (!isAuthenticated) return
@@ -94,7 +90,7 @@ export default function LoginClient() {
     if (window.location.pathname === "/") {
       gotoAfterLogin()
     }
-  }, [bootstrapped, isAuthenticated, nextPath]) // router는 내부에서만 사용
+  }, [bootstrapped, isAuthenticated, nextPath])
 
   function validateEmail(value: string) {
     const v = value.trim()
@@ -112,17 +108,26 @@ export default function LoginClient() {
     return ""
   }
 
+  function validateOtp(value: string) {
+    const v = value.replace(/\s+/g, "")
+    if (!v) return "OTP code is required"
+    if (!/^\d{6}$/.test(v)) return "OTP must be 6 digits"
+    return ""
+  }
+
   const titleText = useMemo(() => {
+    if (mode === "login" && stage === "otp") return "Two-Factor Verification"
     if (mode === "login") return "Security Operations Center"
     if (mode === "forgot") return "Password Reset"
     return "Set New Password"
-  }, [mode])
+  }, [mode, stage])
 
   const descText = useMemo(() => {
+    if (mode === "login" && stage === "otp") return "Enter the 6-digit code from Google Authenticator"
     if (mode === "login") return "Authenticate to continue to GateGuard SOC Dashboard"
     if (mode === "forgot") return "Enter your email to receive a reset link"
     return "Enter your new password below"
-  }, [mode])
+  }, [mode, stage])
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault()
@@ -144,13 +149,34 @@ export default function LoginClient() {
 
     try {
       setSubmitting(true)
-      const success = await login(email.trim(), password)
 
-      if (success) {
-        gotoAfterLogin()
-      } else {
-        setError("Invalid credentials. Try one of the demo accounts below.")
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email: email.trim(),
+          password,
+        }),
+      })
+
+      const data = await res.json().catch(() => null)
+
+      if (!res.ok || !data?.ok) {
+        setError("Invalid credentials. Please try again.")
+        return
       }
+
+      if (data?.requires_2fa) {
+        setStage("otp")
+        setOtp("")
+        setError("")
+        setFieldErrors({})
+        return
+      }
+
+      gotoAfterLogin()
     } catch {
       setError("Login failed. Please try again.")
     } finally {
@@ -158,17 +184,42 @@ export default function LoginClient() {
     }
   }
 
-  async function handleQuickLogin(userEmail: string) {
+  async function handleOtpVerify(e: React.FormEvent) {
+    e.preventDefault()
     if (submitting) return
+
     setError("")
     setFieldErrors({})
 
+    const otpErr = validateOtp(otp)
+    if (otpErr) {
+      setFieldErrors({ otp: otpErr })
+      return
+    }
+
     try {
       setSubmitting(true)
-      await login(userEmail, "demo")
+
+      const res = await fetch("/api/auth/2fa/verify", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          token: otp.replace(/\s+/g, ""),
+        }),
+      })
+
+      const data = await res.json().catch(() => null)
+
+      if (!res.ok || !data?.ok) {
+        setError("Invalid verification code. Please try again.")
+        return
+      }
+
       gotoAfterLogin()
     } catch {
-      setError("Login failed. Please try again.")
+      setError("2FA verification failed. Please try again.")
     } finally {
       setSubmitting(false)
     }
@@ -195,14 +246,13 @@ export default function LoginClient() {
           </CardHeader>
 
           <CardContent className="px-6 pb-6">
-            {/* 디버그: 원인 확정용(원인 잡히면 지워도 됨) */}
             <div className="mb-3 rounded-md border bg-muted/30 p-2 text-[11px] text-muted-foreground">
               <div className="font-mono">next.raw: {nextInfo.raw ?? "null"}</div>
               <div className="font-mono">next.decoded: {nextInfo.decoded ?? "null"}</div>
               <div className="font-mono">next.path: {nextPath ?? "null"}</div>
             </div>
 
-            {mode === "login" && (
+            {mode === "login" && stage === "credentials" && (
               <form onSubmit={handleLogin} className="flex flex-col gap-4">
                 <div className="flex flex-col gap-1.5">
                   <Label htmlFor="email" className="text-sm font-medium text-foreground">
@@ -282,6 +332,54 @@ export default function LoginClient() {
               </form>
             )}
 
+            {mode === "login" && stage === "otp" && (
+              <form onSubmit={handleOtpVerify} className="flex flex-col gap-4">
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="otp" className="text-sm font-medium text-foreground">
+                    Authentication Code
+                  </Label>
+                  <Input
+                    id="otp"
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={6}
+                    placeholder="123456"
+                    value={otp}
+                    onChange={e => {
+                      const next = e.target.value.replace(/[^\d]/g, "").slice(0, 6)
+                      setOtp(next)
+                      if (fieldErrors.otp) setFieldErrors(prev => ({ ...prev, otp: undefined }))
+                    }}
+                    className={`h-9 ${fieldErrors.otp ? "border-destructive focus-visible:ring-destructive" : ""}`}
+                    aria-invalid={!!fieldErrors.otp}
+                    disabled={submitting}
+                  />
+                  {fieldErrors.otp && <p className="text-xs text-destructive">{fieldErrors.otp}</p>}
+                </div>
+
+                {error && <p className="text-sm text-destructive">{error}</p>}
+
+                <Button type="submit" className="h-9 w-full" disabled={submitting}>
+                  {submitting ? "Verifying..." : "Verify and Continue"}
+                </Button>
+
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-9 w-full"
+                  disabled={submitting}
+                  onClick={() => {
+                    setStage("credentials")
+                    setOtp("")
+                    setError("")
+                    setFieldErrors({})
+                  }}
+                >
+                  Back
+                </Button>
+              </form>
+            )}
+
             {mode === "forgot" && (
               <div className="flex flex-col gap-4">
                 <div className="flex flex-col gap-1.5">
@@ -324,39 +422,6 @@ export default function LoginClient() {
                 <Button className="h-9 w-full" onClick={() => setMode("login")}>
                   Reset password
                 </Button>
-              </div>
-            )}
-
-            {mode === "login" && (
-              <div className="mt-6 border-t pt-4">
-                <p className="mb-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">Demo Accounts</p>
-                <div className="flex flex-col gap-2">
-                  {mockUsers.slice(0, 3).map(u => (
-                    <button
-                      key={u.id}
-                      type="button"
-                      onClick={() => handleQuickLogin(u.email)}
-                      className="flex items-center justify-between rounded-md border px-3 py-2 text-left text-sm transition-colors hover:bg-muted"
-                      disabled={submitting}
-                    >
-                      <div>
-                        <span className="font-medium text-foreground">{u.name}</span>
-                        <span className="ml-2 text-xs text-muted-foreground">{u.email}</span>
-                      </div>
-                      <span
-                        className={`inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold ${
-                          u.role === "Admin"
-                            ? "bg-primary text-primary-foreground"
-                            : u.role === "Operator"
-                              ? "bg-success text-white"
-                              : "bg-warning text-white"
-                        }`}
-                      >
-                        {u.role}
-                      </span>
-                    </button>
-                  ))}
-                </div>
               </div>
             )}
           </CardContent>
