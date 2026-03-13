@@ -1305,8 +1305,8 @@ def list_policies(
             params.append(action)
 
         if is_enabled is not None and "is_enabled" in cols:
-            where.append("is_enabled=%s")
-            params.append(int(is_enabled))
+                where.append("is_enabled=%s")
+                params.append(int(is_enabled))
 
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
