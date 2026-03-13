@@ -1,20 +1,36 @@
 export const runtime = "nodejs"
 
 import { NextResponse } from "next/server"
-import { mockUsers } from "@/lib/mock-data"
+import bcrypt from "bcryptjs"
+
+import { findUserByEmail, mapDbRoleToUiRole } from "@/lib/auth-db"
 import { buildSessionCookie, SESSION_MAX_AGE_SEC } from "@/lib/session"
 
 export async function POST(req: Request) {
   const { email, password } = await req.json().catch(() => ({} as any))
+
   if (!email || !password) {
     return NextResponse.json({ ok: false, error: "MISSING_FIELDS" }, { status: 400 })
   }
 
-  const e = String(email).trim()
-  const found = mockUsers.find(u => u.email === e)
-  const user = found || (e.includes("@") ? mockUsers[0] : null)
-  if (!user) {
+  const normalizedEmail = String(email).trim().toLowerCase()
+  const plainPassword = String(password)
+
+  const dbUser = await findUserByEmail(normalizedEmail)
+  if (!dbUser || Number(dbUser.is_active) !== 1) {
     return NextResponse.json({ ok: false, error: "INVALID_CREDENTIALS" }, { status: 401 })
+  }
+
+  const matched = await bcrypt.compare(plainPassword, dbUser.password_hash)
+  if (!matched) {
+    return NextResponse.json({ ok: false, error: "INVALID_CREDENTIALS" }, { status: 401 })
+  }
+
+  const user = {
+    id: String(dbUser.user_id),
+    email: dbUser.email,
+    name: dbUser.name,
+    role: mapDbRoleToUiRole(dbUser.role),
   }
 
   const cookie = await buildSessionCookie(user, SESSION_MAX_AGE_SEC)
@@ -29,5 +45,6 @@ export async function POST(req: Request) {
     path: "/",
     maxAge: cookie.maxAge,
   })
+
   return res
 }

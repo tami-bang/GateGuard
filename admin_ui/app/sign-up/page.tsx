@@ -209,21 +209,33 @@ export default function SignUpPage() {
     try {
       setSubmitting(true)
 
-      // 예시:
-      // const res = await fetch("/api/auth/sign-up", {
-      //   method: "POST",
-      //   headers: { "Content-Type": "application/json" },
-      //   body: JSON.stringify({
-      //     firstName: firstName.trim(),
-      //     lastName: lastName.trim(),
-      //     email, // 항상 @gateguard.io 포함
-      //     password,
-      //   }),
-      // })
-      // if (!res.ok) throw new Error("Sign up failed")
+      const res = await fetch("/api/auth/sign-up", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          firstName: firstName.trim(),
+          lastName: lastName.trim(),
+          email,
+          password,
+        }),
+      })
 
-      await new Promise(r => setTimeout(r, 600))
-      router.replace("/")
+      const data = await res.json().catch(() => null)
+
+      if (!res.ok) {
+        if (data?.error === "EMAIL_ALREADY_EXISTS") {
+          setError("This email is already registered.")
+        } else if (data?.error === "INVALID_EMAIL") {
+          setError("Email format is invalid.")
+        } else if (data?.error === "INVALID_PASSWORD") {
+          setError("Password must be at least 8 characters and include letters and numbers.")
+        } else {
+          setError("Sign up failed. Please try again.")
+        }
+        return
+      }
+
+      router.replace("/dashboard")
     } catch {
       setError("Sign up failed. Please try again.")
     } finally {

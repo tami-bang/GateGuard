@@ -1,10 +1,14 @@
-import { type User } from "./mock-data"
+export type SessionUser = {
+  id: string
+  email: string
+  name: string
+  role: "Admin" | "Operator" | "Engineer"
+}
 
 const COOKIE_NAME = "gg_session"
 const DEFAULT_MAX_AGE_SEC = 60 * 60 * 8 // 8 hours
 
 function getSecret(): string {
-  // Edge에서도 빌드 시점에 주입되는 env는 접근 가능
   return process.env.GG_SESSION_SECRET || "dev-secret-change-me"
 }
 
@@ -37,7 +41,7 @@ async function hmacSha256Base64url(secret: string, data: string): Promise<string
   return base64urlFromBytes(new Uint8Array(sig))
 }
 
-export async function buildSessionCookie(user: User, maxAgeSec = DEFAULT_MAX_AGE_SEC) {
+export async function buildSessionCookie(user: SessionUser, maxAgeSec = DEFAULT_MAX_AGE_SEC) {
   const now = Math.floor(Date.now() / 1000)
   const payload = {
     sub: user.id,
