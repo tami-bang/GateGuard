@@ -1582,6 +1582,100 @@ def patch_policy(policy_id: int, req: PolicyPatchRequest, request: Request):
             pass
         conn.close()
 
+@app.delete("/v1/policies/{policy_id}")
+@app.delete("/policies/{policy_id}")
+def delete_policy(policy_id: int, request: Request):
+    conn = db_conn()
+    try:
+        conn.autocommit(False)
+
+        policy_cols = _get_table_cols(conn, "policy")
+        rule_cols = _get_table_cols(conn, "policy_rule")
+        audit_cols = _get_table_cols(conn, "policy_audit")
+
+        reviewer_id = _get_reviewer_id_from_header(request)
+        changed_by = int(reviewer_id) if reviewer_id is not None and int(reviewer_id) > 0 else 1
+
+        # 존재 확인 + 삭제 전 스냅샷
+        before_snapshot = _snapshot_policy(conn, int(policy_id))
+
+        with conn.cursor() as cur:
+            # 이미 비활성화된 정책이면 중복 삭제 방지
+            current_policy = before_snapshot.get("policy") or {}
+            if int(current_policy.get("is_enabled") or 0) == 0:
+                raise HTTPException(status_code=400, detail="policy already deleted/disabled")
+
+            # 1) policy 비활성화 (soft delete)
+            policy_update_payload: Dict[str, Any] = {}
+            if "is_enabled" in policy_cols:
+                policy_update_payload["is_enabled"] = 0
+            if "updated_at" in policy_cols:
+                policy_update_payload["updated_at"] = _now_str()
+            if "updated_by" in policy_cols:
+                policy_update_payload["updated_by"] = changed_by
+
+            if policy_update_payload:
+                _update_dynamic(cur, "policy", "policy_id", int(policy_id), policy_update_payload)
+
+            # 2) policy_rule도 함께 비활성화
+            rule_update_payload: Dict[str, Any] = {}
+            if "is_enabled" in rule_cols:
+                rule_update_payload["is_enabled"] = 0
+
+            if rule_update_payload:
+                _update_dynamic(cur, "policy_rule", "policy_id", int(policy_id), rule_update_payload)
+
+            # 3) 삭제 후 스냅샷 (실제로는 soft delete 상태)
+            after_snapshot = _snapshot_policy(conn, int(policy_id))
+
+            # 4) policy_audit INSERT (DELETE)
+            audit_payload = {
+                "policy_id": int(policy_id),
+                "action": "DELETE",
+                "changed_by": changed_by,
+                "changed_at": _now_str(),
+                "change_note": f"policy soft-deleted via API: policy_id={int(policy_id)}",
+                "before_snapshot": json.dumps(before_snapshot, ensure_ascii=False, default=str),
+                "after_snapshot": json.dumps(after_snapshot, ensure_ascii=False, default=str),
+            }
+            audit_payload = _filter_payload_by_cols(audit_payload, audit_cols)
+            if audit_payload:
+                _insert_dynamic(cur, "policy_audit", audit_payload)
+
+        conn.commit()
+
+        _safe_send_policy_alert(
+            event_action="DELETE",
+            policy_id=int(policy_id),
+            changed_by=int(changed_by),
+            before_snapshot=before_snapshot,
+            after_snapshot=after_snapshot,
+            change_note=f"policy soft-deleted via API: policy_id={int(policy_id)}",
+        )
+
+        return {
+            "ok": True,
+            "deleted_policy_id": int(policy_id),
+            "delete_mode": "soft",
+            "policy": _get_policy_by_id(conn, int(policy_id)),
+        }
+
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+
+        _safe_send_platform_error(f"/v1/policies/{policy_id} [DELETE]", str(e))
+
+        raise HTTPException(status_code=500, detail=f"delete policy failed: {str(e)}")
+    finally:
+        try:
+            conn.autocommit(True)
+        except Exception:
+            pass
+        conn.close()
+
 @app.post("/v1/policies/{policy_id}/rules")
 @app.post("/policies/{policy_id}/rules")
 def create_policy_rule(policy_id: int, req: PolicyRuleCreateRequest, request: Request):
