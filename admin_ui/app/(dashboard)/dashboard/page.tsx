@@ -568,15 +568,35 @@ export default function DashboardPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      {/* header */}
+	  {/* header */}
       <div className="flex items-start justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold text-[#111827]">Dashboard</h1>
-          <p className="text-sm text-[#6B7280]">
-            SOC-style security operations overview
-            {loading ? " · Loading..." : ""}
-            {error ? ` · ${error}` : ""}
-          </p>
+
+          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+            <span className="text-xs font-semibold text-[#111827]">System Status:</span>
+
+            {healthItems.map((item) => {
+              const status = String(item.value || "").toUpperCase()
+
+              const dotClass =
+                status === "RUNNING"
+                  ? "bg-emerald-500"
+                  : status === "FAILED" || status === "STOPPED" || status === "MISSING"
+                  ? "bg-red-500"
+                  : "bg-amber-400"
+
+              return (
+                <div
+                  key={item.label}
+                  className="flex items-center gap-1.5 rounded-full border border-[#E5E7EB] bg-[#F8FAFC] px-2.5 py-1"
+                >
+                  <span className={`h-2 w-2 rounded-full ${dotClass}`} />
+                  <span className="text-[#6B7280]">{item.label}</span>
+                </div>
+              )
+            })}
+          </div>
         </div>
 
         {/* time range */}
@@ -629,8 +649,7 @@ export default function DashboardPage() {
                   <div className={cn("h-1 w-full bg-gradient-to-r", kpi.accentClass)} />
 
                   <CardContent className="flex min-w-0 flex-col gap-3 p-4">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex min-w-0 items-center gap-2">
+                    <div className="flex items-center justify-between gap-4 flex-wrap">                      <div className="flex min-w-0 items-center gap-2">
                         <div className="rounded-md bg-slate-50 p-2 transition-colors duration-200 group-hover:bg-slate-100">
                           <kpi.icon className="size-4 text-[#1E3A8A]" />
                         </div>
@@ -656,44 +675,6 @@ export default function DashboardPage() {
               </Link>
             ))}
       </div>
-
-      {/* system status */}
-      <Card className="border border-[#E5E7EB] bg-white shadow-sm">
-        <CardHeader className="pb-2">
-          <div className="flex items-center justify-between gap-3">
-            <CardTitle className="text-sm font-semibold text-[#111827]">System Status</CardTitle>
-            <Badge variant="outline" className="text-xs font-normal">
-              {healthLoading ? "Loading..." : healthError ? "Health Check Error" : "Live Status"}
-            </Badge>
-          </div>
-        </CardHeader>
-
-        <CardContent>
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            {healthItems.map((item) => (
-              <div
-                key={item.label}
-                className="flex items-center justify-between rounded-xl border border-[#E5E7EB] bg-[#F8FAFC] px-4 py-3 transition-colors duration-200 hover:bg-[#F1F5F9]"
-              >
-                <div className="flex items-center gap-3">
-                  <div className="rounded-md bg-white p-2 shadow-sm">
-                    <item.icon className="size-4 text-[#6B7280]" />
-                  </div>
-
-                  <div className="flex flex-col">
-                    <span className="text-xs text-[#6B7280]">{item.label}</span>
-                    <span className="text-sm font-medium text-[#111827]">{item.value}</span>
-                  </div>
-                </div>
-
-                <StatusChip value={item.value} type="health" size="sm" />
-              </div>
-            ))}
-          </div>
-
-          {healthError ? <div className="mt-3 text-xs text-red-600">{healthError}</div> : null}
-        </CardContent>
-      </Card>
 
       {/* request trend + decision distribution */}
       <div className="grid gap-4 xl:grid-cols-3">
