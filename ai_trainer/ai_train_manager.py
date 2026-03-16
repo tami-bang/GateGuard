@@ -48,6 +48,7 @@ def run_training_pipeline(config: Dict[str, Any]) -> Dict[str, Any]:
     if dataset.labels.empty:
         raise ValueError("No labels found after preprocessing CSV files")
 
+    # 1) evaluation split
     x_train_df, x_valid_df, y_train, y_valid = train_test_split(
         dataset.dataframe,
         dataset.labels,
@@ -56,27 +57,34 @@ def run_training_pipeline(config: Dict[str, Any]) -> Dict[str, Any]:
         stratify=dataset.labels,
     )
 
-    vectorizer, x_train = fit_feature_pipeline(x_train_df, config)
-    x_valid = transform_feature_pipeline(x_valid_df, vectorizer)
+    # 2) fit/evaluate on train-valid split
+    eval_vectorizer, x_train = fit_feature_pipeline(x_train_df, config)
+    x_valid = transform_feature_pipeline(x_valid_df, eval_vectorizer)
 
-    label_encoder, y_train_enc, y_valid_enc = encode_labels(y_train, y_valid)
+    eval_label_encoder, y_train_enc, y_valid_enc = encode_labels(y_train, y_valid)
 
-    model = build_model(config)
-    trained_model = train_model(model, x_train, y_train_enc)
+    eval_model = build_model(config)
+    eval_trained_model = train_model(eval_model, x_train, y_train_enc)
 
-    y_pred_enc = predict(trained_model, x_valid)
-    y_score = predict_top_score(trained_model, x_valid)
+    y_pred_enc = predict(eval_trained_model, x_valid)
+    y_score = predict_top_score(eval_trained_model, x_valid)
 
-    y_pred = label_encoder.inverse_transform(y_pred_enc)
-    y_valid_labels = label_encoder.inverse_transform(y_valid_enc)
+    y_pred = eval_label_encoder.inverse_transform(y_pred_enc)
+    y_valid_labels = eval_label_encoder.inverse_transform(y_valid_enc)
 
     metrics = evaluate_classification(y_valid_labels, y_pred, y_score)
 
+    # 3) refit on full dataset for deployment artifacts
+    full_vectorizer, x_full = fit_feature_pipeline(dataset.dataframe, config)
+    full_label_encoder, y_full_enc, _ = encode_labels(dataset.labels)
+    full_model = build_model(config)
+    full_trained_model = train_model(full_model, x_full, y_full_enc)
+
     output_dir = config["output"]["output_dir"]
     artifact_paths = save_all_artifacts(
-        model=trained_model,
-        vectorizer=vectorizer,
-        label_encoder=label_encoder,
+        model=full_trained_model,
+        vectorizer=full_vectorizer,
+        label_encoder=full_label_encoder,
         config=config,
         metrics=metrics,
         feature_columns=dataset.feature_columns,

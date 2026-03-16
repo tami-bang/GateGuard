@@ -103,7 +103,7 @@ def safe_lower(value: Any) -> str:
     return str(value).strip().lower()
 
 
-def normalize_url(url: str) -> str:
+def canonicalize_url(url: str) -> str:
     url_norm = safe_lower(url)
     if not url_norm:
         return ""
@@ -111,10 +111,30 @@ def normalize_url(url: str) -> str:
     if not url_norm.startswith(("http://", "https://")):
         url_norm = "http://" + url_norm
 
-    return url_norm
+    try:
+        parsed = urlparse(url_norm)
+    except Exception:
+        return ""
+
+    host = safe_lower(parsed.netloc)
+    path = parsed.path or "/"
+
+    if not host:
+        return ""
+
+    if ":" in host:
+        host = host.split(":", 1)[0]
+
+    if not path.startswith("/"):
+        path = "/" + path
+
+    if len(path) > 1 and path.endswith("/"):
+        path = path.rstrip("/")
+
+    return f"{host}{path}"
 
 
-def build_url(host: str, path: str) -> str:
+def build_canonical_url(host: str, path: str) -> str:
     host_norm = safe_lower(host)
     path_norm = str(path or "").strip()
 
@@ -124,27 +144,28 @@ def build_url(host: str, path: str) -> str:
     if not path_norm.startswith("/"):
         path_norm = "/" + path_norm
 
-    return normalize_url(f"{host_norm}{path_norm}")
+    return canonicalize_url(f"{host_norm}{path_norm}")
 
 
 def split_url(url: str) -> Dict[str, str]:
     try:
-        parsed = urlparse(url)
+        parsed = urlparse("http://" + url if "://" not in url else url)
         host = parsed.netloc or ""
-        path = parsed.path or ""
+        path = parsed.path or "/"
         query = parsed.query or ""
 
+        if ":" in host:
+            host = host.split(":", 1)[0]
+
         return {
-            "scheme": parsed.scheme or "",
-            "host": host,
+            "host": safe_lower(host),
             "path": path,
             "query": query,
         }
     except Exception:
         return {
-            "scheme": "",
             "host": "",
-            "path": "",
+            "path": "/",
             "query": "",
         }
 
@@ -205,13 +226,14 @@ def contains_hex_like_token(text: str) -> int:
 
 
 def build_feature_row(host: str, path: str) -> Dict[str, Any]:
-    url = build_url(host, path)
-    split = split_url(url)
+    canonical_url = build_canonical_url(host, path)
+    split = split_url(canonical_url)
 
     host_value = split["host"]
     path_value = split["path"]
     query_value = split["query"]
-    full_text = f"{host_value}{path_value}?{query_value}"
+
+    full_text = f"{host_value}{path_value}"
     tld = extract_tld(host_value)
 
     host_suspicious_hits = keyword_hit_count(host_value, SUSPICIOUS_KEYWORDS)
@@ -226,20 +248,20 @@ def build_feature_row(host: str, path: str) -> Dict[str, Any]:
     brand_suspicious_combo = int(has_brand and has_suspicious)
 
     return {
-        "url": url,
-        "url_length": len(url),
+        "url": canonical_url,
+        "url_length": len(canonical_url),
         "host_length": len(host_value),
         "path_length": len(path_value),
         "query_length": len(query_value),
-        "slash_count": url.count("/"),
-        "dot_count": url.count("."),
-        "hyphen_count": url.count("-"),
-        "underscore_count": url.count("_"),
-        "question_mark_count": url.count("?"),
-        "ampersand_count": url.count("&"),
-        "equal_count": url.count("="),
-        "digit_count": count_digits(url),
-        "special_char_count": count_special_chars(url),
+        "slash_count": canonical_url.count("/"),
+        "dot_count": canonical_url.count("."),
+        "hyphen_count": canonical_url.count("-"),
+        "underscore_count": canonical_url.count("_"),
+        "question_mark_count": canonical_url.count("?"),
+        "ampersand_count": canonical_url.count("&"),
+        "equal_count": canonical_url.count("="),
+        "digit_count": count_digits(canonical_url),
+        "special_char_count": count_special_chars(canonical_url),
         "suspicious_keyword_hits": keyword_hit_count(full_text, SUSPICIOUS_KEYWORDS),
         "host_suspicious_keyword_hits": host_suspicious_hits,
         "path_suspicious_keyword_hits": path_suspicious_hits,
@@ -259,7 +281,7 @@ def build_feature_row(host: str, path: str) -> Dict[str, Any]:
         "is_suspicious_tld": int(tld in SUSPICIOUS_TLDS),
         "has_long_host": int(len(host_value) >= 25),
         "has_many_subdomains": int(subdomain_count(host_value) >= 2),
-        "has_at_symbol": int("@" in url),
+        "has_at_symbol": int("@" in canonical_url),
         "double_slash_in_path": int("//" in path_value),
         "contains_hex_like_token": contains_hex_like_token(full_text),
     }

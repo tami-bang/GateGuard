@@ -86,7 +86,7 @@ SUSPICIOUS_TLDS = {
     "buzz",
 }
 
-VALID_LABELS = {"benign", "phishing", "malware"}
+VALID_LABELS = {"benign", "malicious"}
 IPV4_PATTERN = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}$")
 HEX_LIKE_PATTERN = re.compile(r"[a-f0-9]{12,}")
 
@@ -105,7 +105,7 @@ def safe_lower(value: Any) -> str:
     return str(value).strip().lower()
 
 
-def normalize_url(url: str) -> str:
+def canonicalize_url(url: str) -> str:
     url_norm = safe_lower(url)
     if not url_norm:
         return ""
@@ -113,27 +113,48 @@ def normalize_url(url: str) -> str:
     if not url_norm.startswith(("http://", "https://")):
         url_norm = "http://" + url_norm
 
-    return url_norm
+    try:
+        parsed = urlparse(url_norm)
+    except Exception:
+        return ""
+
+    host = safe_lower(parsed.netloc)
+    path = parsed.path or "/"
+
+    if not host:
+        return ""
+
+    if ":" in host:
+        host = host.split(":", 1)[0]
+
+    if not path.startswith("/"):
+        path = "/" + path
+
+    if len(path) > 1 and path.endswith("/"):
+        path = path.rstrip("/")
+
+    return f"{host}{path}"
 
 
 def split_url(url: str) -> Dict[str, str]:
     try:
-        parsed = urlparse(url)
+        parsed = urlparse("http://" + url if "://" not in url else url)
         host = parsed.netloc or ""
-        path = parsed.path or ""
+        path = parsed.path or "/"
         query = parsed.query or ""
 
+        if ":" in host:
+            host = host.split(":", 1)[0]
+
         return {
-            "scheme": parsed.scheme or "",
-            "host": host,
+            "host": safe_lower(host),
             "path": path,
             "query": query,
         }
     except Exception:
         return {
-            "scheme": "",
             "host": "",
-            "path": "",
+            "path": "/",
             "query": "",
         }
 
@@ -153,11 +174,6 @@ def count_char(text: str, ch: str) -> int:
 def keyword_hit_count(text: str, keywords: List[str]) -> int:
     text_lower = safe_lower(text)
     return sum(1 for kw in keywords if kw in text_lower)
-
-
-def contains_any_keyword(text: str, keywords: List[str]) -> int:
-    text_lower = safe_lower(text)
-    return int(any(kw in text_lower for kw in keywords))
 
 
 def has_suspicious_extension(path: str) -> int:
@@ -200,13 +216,17 @@ def contains_hex_like_token(text: str) -> int:
 
 def build_feature_row(url: str, label: str) -> Dict[str, Any] | None:
     try:
-        normalized_url = normalize_url(url)
-        split = split_url(normalized_url)
+        canonical_url = canonicalize_url(url)
+        if not canonical_url:
+            return None
+
+        split = split_url(canonical_url)
 
         host = split["host"]
         path = split["path"]
         query = split["query"]
-        full_text = f"{host}{path}?{query}"
+
+        full_text = f"{host}{path}"
         tld = extract_tld(host)
 
         host_suspicious_hits = keyword_hit_count(host, SUSPICIOUS_KEYWORDS)
@@ -222,20 +242,20 @@ def build_feature_row(url: str, label: str) -> Dict[str, Any] | None:
         brand_suspicious_combo = int(has_brand and has_suspicious)
 
         return {
-            "url": normalized_url,
-            "url_length": len(normalized_url),
+            "url": canonical_url,
+            "url_length": len(canonical_url),
             "host_length": len(host),
             "path_length": len(path),
             "query_length": len(query),
-            "slash_count": normalized_url.count("/"),
-            "dot_count": normalized_url.count("."),
-            "hyphen_count": normalized_url.count("-"),
-            "underscore_count": normalized_url.count("_"),
-            "question_mark_count": normalized_url.count("?"),
-            "ampersand_count": normalized_url.count("&"),
-            "equal_count": normalized_url.count("="),
-            "digit_count": count_digits(normalized_url),
-            "special_char_count": count_special_chars(normalized_url),
+            "slash_count": canonical_url.count("/"),
+            "dot_count": canonical_url.count("."),
+            "hyphen_count": canonical_url.count("-"),
+            "underscore_count": canonical_url.count("_"),
+            "question_mark_count": canonical_url.count("?"),
+            "ampersand_count": canonical_url.count("&"),
+            "equal_count": canonical_url.count("="),
+            "digit_count": count_digits(canonical_url),
+            "special_char_count": count_special_chars(canonical_url),
             "suspicious_keyword_hits": keyword_hit_count(full_text, SUSPICIOUS_KEYWORDS),
             "host_suspicious_keyword_hits": host_suspicious_hits,
             "path_suspicious_keyword_hits": path_suspicious_hits,
@@ -255,7 +275,7 @@ def build_feature_row(url: str, label: str) -> Dict[str, Any] | None:
             "is_suspicious_tld": int(tld in SUSPICIOUS_TLDS),
             "has_long_host": int(len(host) >= 25),
             "has_many_subdomains": int(subdomain_count(host) >= 2),
-            "has_at_symbol": int("@" in normalized_url),
+            "has_at_symbol": int("@" in canonical_url),
             "double_slash_in_path": int("//" in path),
             "contains_hex_like_token": contains_hex_like_token(full_text),
             "label": safe_lower(label),
@@ -289,9 +309,21 @@ def clean_dataset(df: pd.DataFrame) -> pd.DataFrame:
     df = df[(df["url"] != "") & (df["label"] != "")]
     df = df[df["label"].isin(VALID_LABELS)]
 
-    df["url"] = df["url"].map(normalize_url)
+    df["url"] = df["url"].map(canonicalize_url)
+    df = df[df["url"] != ""].copy()
 
-    df = df.drop_duplicates(subset=["url", "label"]).reset_index(drop=True)
+    conflict_counts = (
+        df.groupby("url")["label"]
+        .nunique()
+        .reset_index(name="label_count")
+    )
+    conflicts = conflict_counts[conflict_counts["label_count"] > 1]["url"]
+
+    if len(conflicts) > 0:
+        print(f"[AI_Trainer] dropped conflicting canonical urls: {len(conflicts)}")
+        df = df[~df["url"].isin(conflicts)].copy()
+
+    df = df.reset_index(drop=True)
     return df
 
 
