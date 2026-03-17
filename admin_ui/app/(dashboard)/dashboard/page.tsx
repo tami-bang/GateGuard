@@ -19,6 +19,7 @@ import {
   Activity,
   ArrowRight,
   BellRing,
+  ShieldCheck,
   type LucideIcon,
 } from "lucide-react"
 
@@ -119,10 +120,10 @@ const GG_COLORS = {
   bgSubtle: "#F8FAFC",
 }
 
-const KPI_CARD_HEIGHT = 108
-const CHART_CARD_HEIGHT = 212
-const BOTTOM_CARD_HEIGHT = 172
-const TRIAGE_ROW_HEIGHT = 136
+const KPI_CARD_HEIGHT = 132
+const CHART_CARD_HEIGHT = 236
+const BOTTOM_CARD_HEIGHT = 194
+const TRIAGE_ROW_HEIGHT = 156
 const GRID_GAP_PX = 8
 const LIVE_FEED_HEIGHT = KPI_CARD_HEIGHT + CHART_CARD_HEIGHT + GRID_GAP_PX
 
@@ -349,7 +350,7 @@ function KpiValue({
   const animated = useCountUp(rawNumber ?? 0, 750)
 
   if (!animateNumber || rawNumber === undefined) {
-    return <span className="truncate text-[18px] font-bold leading-none tracking-tight text-[#111827]">{value}</span>
+    return <span className="truncate text-[21px] font-bold leading-none tracking-tight text-[#111827]">{value}</span>
   }
 
   const display =
@@ -357,7 +358,7 @@ function KpiValue({
       ? `${animated.toFixed(1)}%`
       : Math.round(animated).toLocaleString()
 
-  return <span className="truncate text-[18px] font-bold leading-none tracking-tight text-[#111827]">{display}</span>
+  return <span className="truncate text-[21px] font-bold leading-none tracking-tight text-[#111827]">{display}</span>
 }
 
 function SkeletonBlock({ className }: { className: string }) {
@@ -375,6 +376,14 @@ function EmptyChartState({
     <div className={cn("flex items-center justify-center text-sm text-[#6B7280]", height)}>
       {message}
     </div>
+  )
+}
+
+function CountPill({ value }: { value: number | string }) {
+  return (
+    <span className="inline-flex shrink-0 items-center rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-medium text-[#6B7280] shadow-sm">
+      {value}
+    </span>
   )
 }
 
@@ -734,14 +743,14 @@ export default function DashboardPage() {
             style={{ height: `${LIVE_FEED_HEIGHT}px` }}
           >
             <div className="flex h-full w-full flex-col">
-              <CardHeader className="pb-0.5 pt-2">
+              <CardHeader className="shrink-0 pb-1 pt-2">
                 <CardTitle className="flex items-center gap-2 text-sm font-semibold text-[#111827]">
                   <BellRing className="size-4 text-[#1E3A8A]" />
                   Live Threat Feed
                 </CardTitle>
               </CardHeader>
 
-              <CardContent className="flex min-h-0 flex-1 flex-col pt-0.5 pb-2">
+              <CardContent className="flex min-h-0 flex-1 flex-col pt-0 pb-3">
                 <div className="grid shrink-0 grid-cols-2 gap-1.5">
                   <Link
                     href={`/logs?${logsRangeQuery}`}
@@ -763,7 +772,7 @@ export default function DashboardPage() {
                 <div className="mt-1.5 min-h-0 flex-1 overflow-y-auto pr-1">
                   <div className="flex flex-col gap-1">
                     {criticalEvents.length === 0 ? (
-                      <div className="flex h-full min-h-[100px] items-center justify-center rounded-md border border-dashed border-[#E5E7EB] text-xs text-[#6B7280]">
+                      <div className="flex h-full min-h-[110px] items-center justify-center rounded-md border border-dashed border-[#E5E7EB] text-xs text-[#6B7280]">
                         No active alerts.
                       </div>
                     ) : (
@@ -831,10 +840,15 @@ export default function DashboardPage() {
                     className="border border-[#E5E7EB] bg-white shadow-sm"
                     style={{ height: `${KPI_CARD_HEIGHT}px` }}
                   >
-                    <CardContent className="flex h-full flex-col items-start justify-start gap-2 px-3 pb-2 pt-2">
-                      <SkeletonBlock className="h-4 w-24" />
-                      <SkeletonBlock className="h-6 w-24" />
-                      <SkeletonBlock className="h-3 w-28" />
+                    <CardContent className="flex h-full flex-col px-3 pb-3 pt-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <SkeletonBlock className="h-4 w-24" />
+                        <SkeletonBlock className="h-4 w-4" />
+                      </div>
+                      <div className="flex flex-1 flex-col justify-center gap-1">
+                        <SkeletonBlock className="h-7 w-24" />
+                        <SkeletonBlock className="h-3 w-28" />
+                      </div>
                     </CardContent>
                   </Card>
                 ))
@@ -846,7 +860,7 @@ export default function DashboardPage() {
                     >
                       <div className={cn("absolute inset-x-0 top-0 h-1 bg-gradient-to-r", kpi.accentClass)} />
 
-                      <CardContent className="flex h-full min-w-0 flex-col items-start justify-start px-3 pb-2 pt-2">
+                      <CardContent className="flex h-full min-w-0 flex-col px-3 pb-3 pt-2">
                         <div className="flex w-full items-center justify-between gap-2">
                           <div className="flex min-w-0 items-center gap-2">
                             <div className="rounded-md bg-slate-50 p-1.5 transition-colors duration-200 group-hover:bg-slate-100">
@@ -858,14 +872,14 @@ export default function DashboardPage() {
                           <ArrowRight className="size-4 shrink-0 text-[#9CA3AF] transition-transform duration-200 group-hover:translate-x-0.5 group-hover:text-[#3B82F6]" />
                         </div>
 
-                        <div className="mt-1.5 flex min-w-0 flex-col gap-0.5">
+                        <div className="flex flex-1 flex-col justify-center">
                           <KpiValue
                             value={kpi.value}
                             rawNumber={kpi.rawNumber}
                             suffix={kpi.suffix}
                             animateNumber={kpi.animateNumber}
                           />
-                          <span className="line-clamp-1 text-[10px] text-[#9CA3AF]" title={kpi.subText}>
+                          <span className="mt-1 line-clamp-1 text-[10px] text-[#9CA3AF]" title={kpi.subText}>
                             {kpi.subText}
                           </span>
                         </div>
@@ -882,18 +896,18 @@ export default function DashboardPage() {
                 style={{ height: `${CHART_CARD_HEIGHT}px` }}
               >
                 <div className="flex h-full w-full flex-col">
-                  <CardHeader className="pb-0.5 pt-2">
+                  <CardHeader className="shrink-0 pb-1 pt-2.5">
                     <CardTitle className="flex items-center justify-between gap-2 text-sm font-semibold text-[#111827]">
                       <span>Hourly Detection Pattern</span>
                       <ArrowRight className="size-4 shrink-0 text-[#9CA3AF] transition-transform duration-200 group-hover:translate-x-0.5 group-hover:text-[#3B82F6]" />
                     </CardTitle>
                   </CardHeader>
-                  <CardContent className="min-h-0 flex-1 pt-0.5 pb-2">
+                  <CardContent className="flex min-h-0 flex-1 flex-col justify-center pt-0 pb-3">
                     {requestsOverTime.length === 0 ? (
-                      <EmptyChartState message="No request trend data." height="h-[150px]" />
+                      <EmptyChartState message="No request trend data." height="h-[170px]" />
                     ) : (
-                      <ResponsiveContainer width="100%" height={156}>
-                        <LineChart data={requestsOverTime} margin={{ top: 8, right: 8, left: -18, bottom: 6 }}>
+                      <ResponsiveContainer width="100%" height={180}>
+                        <LineChart data={requestsOverTime} margin={{ top: 0, right: 8, left: -18, bottom: 4 }}>
                           <CartesianGrid strokeDasharray="3 3" stroke={GG_COLORS.border} />
                           <XAxis
                             dataKey="hour"
@@ -911,7 +925,7 @@ export default function DashboardPage() {
                             type="monotone"
                             dataKey="requests"
                             stroke={GG_COLORS.primary}
-                            strokeWidth={2}
+                            strokeWidth={2.35}
                             dot={false}
                           />
                         </LineChart>
@@ -928,30 +942,30 @@ export default function DashboardPage() {
                 style={{ height: `${CHART_CARD_HEIGHT}px` }}
               >
                 <div className="flex h-full w-full flex-col">
-                  <CardHeader className="pb-0.5 pt-2">
+                  <CardHeader className="shrink-0 pb-1 pt-2.5">
                     <CardTitle className="flex items-center justify-between gap-2 text-sm font-semibold text-[#111827]">
                       <span>AI Threat Distribution</span>
                       <ArrowRight className="size-4 shrink-0 text-[#9CA3AF] transition-transform duration-200 group-hover:translate-x-0.5 group-hover:text-[#3B82F6]" />
                     </CardTitle>
                   </CardHeader>
-                  <CardContent className="min-h-0 flex-1 pt-0.5 pb-2">
+                  <CardContent className="flex min-h-0 flex-1 flex-col justify-center pt-0 pb-3">
                     {aiThreatLoading ? (
-                      <EmptyChartState message="Loading AI threat distribution..." height="h-[150px]" />
+                      <EmptyChartState message="Loading AI threat distribution..." height="h-[170px]" />
                     ) : aiThreatError ? (
-                      <EmptyChartState message={aiThreatError} height="h-[150px]" />
+                      <EmptyChartState message={aiThreatError} height="h-[170px]" />
                     ) : aiThreatDist.length === 0 ? (
-                      <EmptyChartState message="No AI threat distribution data." height="h-[150px]" />
+                      <EmptyChartState message="No AI threat distribution data." height="h-[170px]" />
                     ) : (
-                      <ResponsiveContainer width="100%" height={156}>
-                        <PieChart margin={{ top: 4, right: 4, left: 4, bottom: 18 }}>
+                      <ResponsiveContainer width="100%" height={180}>
+                        <PieChart margin={{ top: 0, right: 4, left: 4, bottom: 12 }}>
                           <Pie
                             data={aiThreatDist}
                             dataKey="count"
                             nameKey="label"
                             cx="50%"
-                            cy="42%"
-                            innerRadius={26}
-                            outerRadius={42}
+                            cy="43%"
+                            innerRadius={30}
+                            outerRadius={49}
                             paddingAngle={3}
                           >
                             {aiThreatDist.map((entry, index) => (
@@ -966,7 +980,7 @@ export default function DashboardPage() {
                               return [`${payload.count} (${payload.percent}%)`, payload.label]
                             }}
                           />
-                          <Legend verticalAlign="bottom" height={26} wrapperStyle={{ fontSize: 10, paddingTop: 6 }} />
+                          <Legend verticalAlign="bottom" height={24} wrapperStyle={{ fontSize: 10, paddingTop: 4 }} />
                         </PieChart>
                       </ResponsiveContainer>
                     )}
@@ -981,26 +995,26 @@ export default function DashboardPage() {
                 style={{ height: `${CHART_CARD_HEIGHT}px` }}
               >
                 <div className="flex h-full w-full flex-col">
-                  <CardHeader className="pb-0.5 pt-2">
+                  <CardHeader className="shrink-0 pb-1 pt-2.5">
                     <CardTitle className="flex items-center justify-between gap-2 text-sm font-semibold text-[#111827]">
                       <span>Decision Distribution</span>
                       <ArrowRight className="size-4 shrink-0 text-[#9CA3AF] transition-transform duration-200 group-hover:translate-x-0.5 group-hover:text-[#3B82F6]" />
                     </CardTitle>
                   </CardHeader>
-                  <CardContent className="min-h-0 flex-1 pt-0.5 pb-2">
+                  <CardContent className="flex min-h-0 flex-1 flex-col justify-center pt-0 pb-3">
                     {decisionDistribution.length === 0 ? (
-                      <EmptyChartState message="No decision distribution data." height="h-[150px]" />
+                      <EmptyChartState message="No decision distribution data." height="h-[170px]" />
                     ) : (
-                      <ResponsiveContainer width="100%" height={156}>
-                        <PieChart margin={{ top: 4, right: 4, left: 4, bottom: 18 }}>
+                      <ResponsiveContainer width="100%" height={180}>
+                        <PieChart margin={{ top: 0, right: 4, left: 4, bottom: 12 }}>
                           <Pie
                             data={decisionDistribution}
                             dataKey="count"
                             nameKey="decision"
                             cx="50%"
-                            cy="42%"
-                            innerRadius={26}
-                            outerRadius={42}
+                            cy="43%"
+                            innerRadius={30}
+                            outerRadius={49}
                             paddingAngle={3}
                           >
                             {decisionDistribution.map((entry, index) => (
@@ -1008,7 +1022,7 @@ export default function DashboardPage() {
                             ))}
                           </Pie>
                           <Tooltip contentStyle={chartTooltipStyle} />
-                          <Legend verticalAlign="bottom" height={26} wrapperStyle={{ fontSize: 10, paddingTop: 6 }} />
+                          <Legend verticalAlign="bottom" height={24} wrapperStyle={{ fontSize: 10, paddingTop: 4 }} />
                         </PieChart>
                       </ResponsiveContainer>
                     )}
@@ -1025,11 +1039,11 @@ export default function DashboardPage() {
             style={{ height: `${BOTTOM_CARD_HEIGHT}px` }}
           >
             <div className="flex h-full w-full flex-col">
-              <CardHeader className="pb-0.5 pt-2">
+              <CardHeader className="shrink-0 pb-1 pt-2.5">
                 <CardTitle className="text-sm font-semibold text-[#111827]">Top Threat Sources</CardTitle>
               </CardHeader>
-              <CardContent className="flex-1 pt-0.5 pb-2">
-                <div className="flex h-full flex-col gap-1.5">
+              <CardContent className="flex flex-1 flex-col justify-center pt-0 pb-3">
+                <div className="flex flex-col gap-1.5">
                   {topClientIps.length === 0 ? (
                     <div className="flex h-full items-center justify-center text-xs text-[#6B7280]">
                       No attacker data.
@@ -1039,12 +1053,12 @@ export default function DashboardPage() {
                       <Link
                         key={`${item.client_ip}-${index}`}
                         href={`/logs?client_ip=${encodeURIComponent(item.client_ip)}&${logsRangeQuery}`}
-                        className="flex items-center justify-between rounded-md border border-[#E5E7EB] bg-[#F8FAFC] px-2 py-1.5 text-[10px] transition-colors hover:bg-slate-50"
+                        className="flex items-center justify-between rounded-md border border-[#E5E7EB] bg-[#F8FAFC] px-2 py-1.5 transition-colors hover:bg-slate-50"
                       >
-                        <span className="truncate font-mono text-[#111827]">
+                        <span className="truncate font-mono text-[10px] text-[#111827]">
                           {index + 1}. {item.client_ip}
                         </span>
-                        <span className="ml-2 shrink-0 font-mono text-[#6B7280]">{item.count}</span>
+                        <CountPill value={item.count} />
                       </Link>
                     ))
                   )}
@@ -1058,11 +1072,11 @@ export default function DashboardPage() {
             style={{ height: `${BOTTOM_CARD_HEIGHT}px` }}
           >
             <div className="flex h-full w-full flex-col">
-              <CardHeader className="pb-0.5 pt-2">
+              <CardHeader className="shrink-0 pb-1 pt-2.5">
                 <CardTitle className="text-sm font-semibold text-[#111827]">Top Target Hosts</CardTitle>
               </CardHeader>
-              <CardContent className="flex-1 pt-0.5 pb-2">
-                <div className="flex h-full flex-col gap-1.5">
+              <CardContent className="flex flex-1 flex-col justify-center pt-0 pb-3">
+                <div className="flex flex-col gap-1.5">
                   {topHosts.length === 0 ? (
                     <div className="flex h-full items-center justify-center text-xs text-[#6B7280]">
                       No target host data.
@@ -1078,7 +1092,7 @@ export default function DashboardPage() {
                           <span className="truncate text-[10px] font-medium text-[#111827]">
                             {index + 1}. {item.host || "Unknown Host"}
                           </span>
-                          <span className="shrink-0 text-[10px] font-mono text-[#6B7280]">{item.count}</span>
+                          <CountPill value={item.count} />
                         </div>
                       </Link>
                     ))
@@ -1093,11 +1107,11 @@ export default function DashboardPage() {
             style={{ height: `${BOTTOM_CARD_HEIGHT}px` }}
           >
             <div className="flex h-full w-full flex-col">
-              <CardHeader className="pb-0.5 pt-2">
+              <CardHeader className="shrink-0 pb-1 pt-2.5">
                 <CardTitle className="text-sm font-semibold text-[#111827]">Top Risk Paths</CardTitle>
               </CardHeader>
-              <CardContent className="flex-1 pt-0.5 pb-2">
-                <div className="flex h-full flex-col gap-1.5">
+              <CardContent className="flex flex-1 flex-col justify-center pt-0 pb-3">
+                <div className="flex flex-col gap-1.5">
                   {topPaths.length === 0 ? (
                     <div className="flex h-full items-center justify-center text-xs text-[#6B7280]">
                       No target path data.
@@ -1113,7 +1127,7 @@ export default function DashboardPage() {
                           <span className="truncate text-[10px] font-medium text-[#111827]">
                             {index + 1}. {item.path || "/"}
                           </span>
-                          <span className="shrink-0 text-[10px] font-mono text-[#6B7280]">{item.count}</span>
+                          <CountPill value={item.count} />
                         </div>
                       </Link>
                     ))
@@ -1129,7 +1143,7 @@ export default function DashboardPage() {
               style={{ height: `${BOTTOM_CARD_HEIGHT}px` }}
             >
               <div className="flex h-full w-full flex-col">
-                <CardHeader className="pb-0.5 pt-2">
+                <CardHeader className="shrink-0 pb-1 pt-2.5">
                   <CardTitle className="flex items-center justify-between gap-2 text-sm font-semibold text-[#111827]">
                     <span className="flex items-center gap-2">
                       <ShieldOff className="size-4 text-[#1E3A8A]" />
@@ -1138,12 +1152,12 @@ export default function DashboardPage() {
                     <ArrowRight className="size-4 shrink-0 text-[#9CA3AF] transition-transform duration-200 group-hover:translate-x-0.5 group-hover:text-[#3B82F6]" />
                   </CardTitle>
                 </CardHeader>
-                <CardContent className="min-h-0 flex-1 pt-0.5 pb-2">
+                <CardContent className="flex min-h-0 flex-1 flex-col justify-center pt-0 pb-3">
                   {policyVsAiComposition.length === 0 ? (
-                    <EmptyChartState message="No enforcement data." height="h-[108px]" />
+                    <EmptyChartState message="No enforcement data." height="h-[130px]" />
                   ) : (
-                    <ResponsiveContainer width="100%" height={108}>
-                      <BarChart data={policyVsAiComposition} margin={{ top: 8, right: 8, left: -18, bottom: 2 }}>
+                    <ResponsiveContainer width="100%" height={132}>
+                      <BarChart data={policyVsAiComposition} margin={{ top: 0, right: 8, left: -18, bottom: 0 }}>
                         <CartesianGrid strokeDasharray="3 3" stroke={GG_COLORS.border} />
                         <XAxis
                           dataKey="label"
@@ -1157,7 +1171,7 @@ export default function DashboardPage() {
                           axisLine={false}
                         />
                         <Tooltip contentStyle={chartTooltipStyle} />
-                        <Bar dataKey="count" radius={[4, 4, 0, 0]} maxBarSize={36}>
+                        <Bar dataKey="count" radius={[4, 4, 0, 0]} maxBarSize={38}>
                           {policyVsAiComposition.map((entry, index) => (
                             <Cell
                               key={`${entry.label}-${index}`}
@@ -1181,27 +1195,30 @@ export default function DashboardPage() {
                 className="flex overflow-hidden border border-[#E5E7EB] bg-white shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md"
                 style={{ height: `${TRIAGE_ROW_HEIGHT}px` }}
               >
-                <CardContent className="flex h-full flex-col justify-between px-3 pb-2.5 pt-2.5">
-                  <div className="min-w-0">
-                    <div className="flex items-center justify-between gap-2">
+                <CardContent className="flex h-full flex-col px-3 pb-3 pt-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <ShieldCheck className="size-3.5 shrink-0 text-[#1E3A8A]" />
                       <div className="truncate text-[10px] font-semibold text-[#111827]">{item.label}</div>
-                      <ArrowRight className="size-3.5 shrink-0 text-[#9CA3AF] transition-transform duration-200 group-hover:translate-x-0.5 group-hover:text-[#3B82F6]" />
                     </div>
+                    <ArrowRight className="size-3.5 shrink-0 text-[#9CA3AF] transition-transform duration-200 group-hover:translate-x-0.5 group-hover:text-[#3B82F6]" />
+                  </div>
 
-                    <div className="mt-1 text-[18px] font-bold leading-none tracking-tight text-[#111827]">
+                  <div className="flex flex-1 flex-col justify-center">
+                    <div className="text-[20px] font-bold leading-none tracking-tight text-[#111827]">
                       {item.value}
                     </div>
                     <div className="mt-1 text-[10px] text-[#6B7280]">{item.countLabel}</div>
                     <div className="mt-1 line-clamp-1 text-[9px] text-[#9CA3AF]">{item.description}</div>
                   </div>
 
-                  <div className="mt-2">
+                  <div>
                     <div className="mb-1 flex items-center justify-between text-[9px]">
                       <span className="text-[#6B7280]">Coverage</span>
                       <span className="font-medium text-[#111827]">{item.barWidth.toFixed(1)}%</span>
                     </div>
 
-                    <div className="h-1.5 overflow-hidden rounded-full bg-slate-200">
+                    <div className="h-2 overflow-hidden rounded-full bg-slate-200">
                       <div
                         className={cn("h-full rounded-full transition-all duration-500", item.barClass)}
                         style={{ width: `${Math.max(0, Math.min(item.barWidth, 100))}%` }}
