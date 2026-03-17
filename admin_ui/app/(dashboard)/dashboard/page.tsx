@@ -94,6 +94,16 @@ type HealthItem = {
   icon: LucideIcon
 }
 
+type TriageItem = {
+  label: string
+  value: string
+  countLabel: string
+  description: string
+  barWidth: number
+  barClass: string
+  href: string
+}
+
 const GG_COLORS = {
   brand: "#1E3A8A",
   primary: "#3B82F6",
@@ -108,6 +118,13 @@ const GG_COLORS = {
   textMuted: "#9CA3AF",
   bgSubtle: "#F8FAFC",
 }
+
+const KPI_CARD_HEIGHT = 108
+const CHART_CARD_HEIGHT = 212
+const BOTTOM_CARD_HEIGHT = 172
+const TRIAGE_ROW_HEIGHT = 136
+const GRID_GAP_PX = 8
+const LIVE_FEED_HEIGHT = KPI_CARD_HEIGHT + CHART_CARD_HEIGHT + GRID_GAP_PX
 
 function formatNumber(v: number | null | undefined): string {
   return Number(v || 0).toLocaleString()
@@ -134,6 +151,35 @@ function getEventTimestamp(item: RecentEvent): string {
     (typeof event.event_time === "string" ? event.event_time : null)
 
   return formatTimestamp(candidate)
+}
+
+function getEventHref(item: RecentEvent): string {
+  const event = item as Record<string, unknown>
+
+  if (event.log_id !== undefined && event.log_id !== null) {
+    return `/logs/${encodeURIComponent(String(event.log_id))}`
+  }
+
+  const params = new URLSearchParams()
+
+  if (event.request_id !== undefined && event.request_id !== null) {
+    params.set("request_id", String(event.request_id))
+  }
+  if (typeof item.host === "string" && item.host) {
+    params.set("host", item.host)
+  }
+  if (typeof item.client_ip === "string" && item.client_ip) {
+    params.set("client_ip", item.client_ip)
+  }
+  if (typeof item.path === "string" && item.path) {
+    params.set("path", item.path)
+  }
+  if (typeof item.decision === "string" && item.decision) {
+    params.set("decision", item.decision)
+  }
+
+  const query = params.toString()
+  return query ? `/logs?${query}` : "/logs"
 }
 
 function normalizeHealthLabel(value: string | null | undefined): string {
@@ -249,6 +295,15 @@ function getSeverityInfo(item: RecentEvent): { label: string; className: string 
   }
 }
 
+function getDecisionCount(items: DecisionDistributionItem[], decision: string): number {
+  return items.find((item) => String(item.decision || "").toUpperCase() === decision)?.count ?? 0
+}
+
+function safePercent(value: number, total: number): number {
+  if (!total || total <= 0) return 0
+  return (value / total) * 100
+}
+
 function useCountUp(target: number, durationMs = 700): number {
   const [value, setValue] = useState(0)
 
@@ -294,7 +349,7 @@ function KpiValue({
   const animated = useCountUp(rawNumber ?? 0, 750)
 
   if (!animateNumber || rawNumber === undefined) {
-    return <span className="truncate text-2xl font-bold tracking-tight text-[#111827]">{value}</span>
+    return <span className="truncate text-[18px] font-bold leading-none tracking-tight text-[#111827]">{value}</span>
   }
 
   const display =
@@ -302,7 +357,7 @@ function KpiValue({
       ? `${animated.toFixed(1)}%`
       : Math.round(animated).toLocaleString()
 
-  return <span className="truncate text-2xl font-bold tracking-tight text-[#111827]">{display}</span>
+  return <span className="truncate text-[18px] font-bold leading-none tracking-tight text-[#111827]">{display}</span>
 }
 
 function SkeletonBlock({ className }: { className: string }) {
@@ -334,7 +389,6 @@ export default function DashboardPage() {
   const [health, setHealth] = useState<SystemHealthResponse | null>(null)
 
   const [aiThreatDist, setAiThreatDist] = useState<DashboardAiThreatDistributionItem[]>([])
-  const [aiThreatTotal, setAiThreatTotal] = useState<number>(0)
   const [aiThreatLoading, setAiThreatLoading] = useState<boolean>(false)
   const [aiThreatError, setAiThreatError] = useState<string>("")
 
@@ -379,13 +433,11 @@ export default function DashboardPage() {
         const res = await apiGetAiThreatDistribution(lastHours)
         if (!cancelled) {
           setAiThreatDist(res.items ?? [])
-          setAiThreatTotal(Number(res.total || 0))
         }
       } catch (e: any) {
         if (!cancelled) {
           setAiThreatError(e?.message || "Failed to load AI threat distribution")
           setAiThreatDist([])
-          setAiThreatTotal(0)
         }
       } finally {
         if (!cancelled) {
@@ -448,6 +500,8 @@ export default function DashboardPage() {
   const recentEvents = data?.recent_events ?? []
   const topClientIps: TopClientIp[] = data?.top_client_ips ?? []
 
+  const logsRangeQuery = useMemo(() => `last_hours=${lastHours}`, [lastHours])
+
   const decisionDistribution = useMemo<DecisionDistributionItem[]>(() => {
     if (data?.decision_distribution) return data.decision_distribution
 
@@ -485,7 +539,7 @@ export default function DashboardPage() {
         value: formatNumber(summary?.total_requests),
         rawNumber: Number(summary?.total_requests || 0),
         icon: Globe,
-        href: "/logs",
+        href: `/logs?${logsRangeQuery}`,
         accentClass: getKpiAccentClass("Total Requests"),
         subText: "All observed HTTP requests",
         animateNumber: true,
@@ -495,7 +549,7 @@ export default function DashboardPage() {
         value: formatNumber(summary?.blocked_requests),
         rawNumber: Number(summary?.blocked_requests || 0),
         icon: ShieldOff,
-        href: "/logs?decision=BLOCK",
+        href: `/logs?decision=BLOCK&${logsRangeQuery}`,
         accentClass: getKpiAccentClass("Blocked Requests"),
         subText: "Directly blocked traffic",
         animateNumber: true,
@@ -506,7 +560,7 @@ export default function DashboardPage() {
         rawNumber: aiBlockRate,
         suffix: "%",
         icon: Brain,
-        href: "/logs?decision=BLOCK&stage=AI_STAGE",
+        href: `/logs?decision=BLOCK&stage=AI_STAGE&${logsRangeQuery}`,
         accentClass: getKpiAccentClass("AI Block Rate"),
         subText: "AI-stage share of blocked events",
         animateNumber: true,
@@ -517,13 +571,13 @@ export default function DashboardPage() {
         rawNumber: policyBlockRate,
         suffix: "%",
         icon: FileText,
-        href: "/logs?decision=BLOCK&stage=POLICY_STAGE",
+        href: `/logs?decision=BLOCK&stage=POLICY_STAGE&${logsRangeQuery}`,
         accentClass: getKpiAccentClass("Policy Block Rate"),
         subText: "Policy-stage share of blocked events",
         animateNumber: true,
       },
     ]
-  }, [summary, aiBlockRate, policyBlockRate])
+  }, [summary, aiBlockRate, policyBlockRate, logsRangeQuery])
 
   const healthItems = useMemo<HealthItem[]>(() => {
     return [
@@ -550,8 +604,59 @@ export default function DashboardPage() {
     ]
   }, [health])
 
+  const allowCount = useMemo(() => getDecisionCount(decisionDistribution, "ALLOW"), [decisionDistribution])
+  const blockCount = useMemo(() => getDecisionCount(decisionDistribution, "BLOCK"), [decisionDistribution])
+  const reviewCount = useMemo(() => getDecisionCount(decisionDistribution, "REVIEW"), [decisionDistribution])
+
+  const triageItems = useMemo<TriageItem[]>(() => {
+    const totalRequests = Number(summary?.total_requests || 0)
+    const blocked = Number(summary?.blocked_requests || 0)
+    const aiBlocks = Number(summary?.ai_enforced_blocks || 0)
+    const policyBlocks = Number(summary?.policy_enforced_blocks || 0)
+    const decisionTotal = allowCount + blockCount + reviewCount
+
+    return [
+      {
+        label: "Block Pressure",
+        value: `${safePercent(blocked, totalRequests).toFixed(1)}%`,
+        countLabel: `${formatNumber(blocked)} / ${formatNumber(totalRequests)}`,
+        description: "Blocked share of total traffic",
+        barWidth: safePercent(blocked, totalRequests),
+        barClass: "bg-red-500",
+        href: `/logs?decision=BLOCK&${logsRangeQuery}`,
+      },
+      {
+        label: "AI Enforcement Bias",
+        value: `${safePercent(aiBlocks, blocked).toFixed(1)}%`,
+        countLabel: `${formatNumber(aiBlocks)} AI blocks`,
+        description: "AI-stage share of blocked events",
+        barWidth: safePercent(aiBlocks, blocked),
+        barClass: "bg-indigo-500",
+        href: `/logs?decision=BLOCK&stage=AI_STAGE&${logsRangeQuery}`,
+      },
+      {
+        label: "Policy Enforcement Bias",
+        value: `${safePercent(policyBlocks, blocked).toFixed(1)}%`,
+        countLabel: `${formatNumber(policyBlocks)} policy blocks`,
+        description: "Policy-stage share of blocked events",
+        barWidth: safePercent(policyBlocks, blocked),
+        barClass: "bg-blue-500",
+        href: `/logs?decision=BLOCK&stage=POLICY_STAGE&${logsRangeQuery}`,
+      },
+      {
+        label: "Review Pressure",
+        value: `${safePercent(reviewCount, decisionTotal).toFixed(1)}%`,
+        countLabel: `${formatNumber(reviewCount)} review events`,
+        description: "Review share across decisions",
+        barWidth: safePercent(reviewCount, decisionTotal),
+        barClass: "bg-amber-500",
+        href: `/logs?decision=REVIEW&${logsRangeQuery}`,
+      },
+    ]
+  }, [summary, allowCount, blockCount, reviewCount, logsRangeQuery])
+
   return (
-    <div className="flex h-[calc(100vh-72px)] flex-col gap-2 overflow-y-auto pr-1">
+    <div className="flex h-[calc(100vh-72px)] flex-col gap-2 overflow-y-auto px-1 pb-1 pr-1">
       <div className="flex shrink-0 flex-col gap-1.5 xl:flex-row xl:items-start xl:justify-between">
         <div className="min-w-0">
           <h1 className="text-xl font-semibold tracking-tight text-[#111827]">Dashboard</h1>
@@ -622,385 +727,491 @@ export default function DashboardPage() {
         </Card>
       ) : null}
 
-      <div className="grid shrink-0 grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
-        {loading && !data
-          ? Array.from({ length: 4 }).map((_, idx) => (
-              <Card key={idx} className="border border-[#E5E7EB] bg-white shadow-sm">
-                <CardContent className="flex flex-col gap-2 p-2.5">
-                  <SkeletonBlock className="h-4 w-24" />
-                  <SkeletonBlock className="h-7 w-24" />
-                  <SkeletonBlock className="h-3 w-28" />
+      <div className="grid min-h-0 flex-1 content-start gap-2">
+        <div className="grid min-h-0 gap-2 xl:grid-cols-[1.06fr_3.14fr]">
+          <Card
+            className="row-span-2 flex overflow-hidden border border-[#E5E7EB] bg-white shadow-sm"
+            style={{ height: `${LIVE_FEED_HEIGHT}px` }}
+          >
+            <div className="flex h-full w-full flex-col">
+              <CardHeader className="pb-0.5 pt-2">
+                <CardTitle className="flex items-center gap-2 text-sm font-semibold text-[#111827]">
+                  <BellRing className="size-4 text-[#1E3A8A]" />
+                  Live Threat Feed
+                </CardTitle>
+              </CardHeader>
+
+              <CardContent className="flex min-h-0 flex-1 flex-col pt-0.5 pb-2">
+                <div className="grid shrink-0 grid-cols-2 gap-1.5">
+                  <Link
+                    href={`/logs?${logsRangeQuery}`}
+                    className="rounded-lg border border-[#E5E7EB] bg-[#F8FAFC] px-2 py-1.5 transition-colors hover:bg-slate-50"
+                  >
+                    <div className="text-[10px] text-[#6B7280]">Window</div>
+                    <div className="text-sm font-semibold text-[#111827]">{lastHours}h</div>
+                  </Link>
+
+                  <Link
+                    href={`/logs?decision=BLOCK&${logsRangeQuery}`}
+                    className="rounded-lg border border-[#E5E7EB] bg-[#F8FAFC] px-2 py-1.5 transition-colors hover:bg-slate-50"
+                  >
+                    <div className="text-[10px] text-[#6B7280]">Alerts</div>
+                    <div className="text-sm font-semibold text-[#111827]">{criticalEvents.length}</div>
+                  </Link>
+                </div>
+
+                <div className="mt-1.5 min-h-0 flex-1 overflow-y-auto pr-1">
+                  <div className="flex flex-col gap-1">
+                    {criticalEvents.length === 0 ? (
+                      <div className="flex h-full min-h-[100px] items-center justify-center rounded-md border border-dashed border-[#E5E7EB] text-xs text-[#6B7280]">
+                        No active alerts.
+                      </div>
+                    ) : (
+                      criticalEvents.map((item, index) => {
+                        const decision = String(item.decision || "UNKNOWN").toUpperCase()
+                        const severity = getSeverityInfo(item)
+                        const eventRecord = item as Record<string, unknown>
+                        const keyValue =
+                          typeof eventRecord.request_id === "string" || typeof eventRecord.request_id === "number"
+                            ? String(eventRecord.request_id)
+                            : `evt-${index}`
+
+                        return (
+                          <Link
+                            key={keyValue}
+                            href={getEventHref(item)}
+                            className={cn(
+                              "rounded-md border px-2 py-1.5 transition-colors",
+                              getRecentEventRowClass(item)
+                            )}
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <div className="truncate text-[10px] font-semibold text-[#111827]">
+                                  {item.host || "Unknown Host"}
+                                </div>
+                                <div className="truncate text-[9px] text-[#6B7280]">
+                                  {item.path || "/"} · {item.client_ip || "N/A"}
+                                </div>
+                                <div className="mt-0.5 text-[9px] text-[#9CA3AF]">{getEventTimestamp(item)}</div>
+                              </div>
+
+                              <div className="flex shrink-0 flex-col items-end gap-1">
+                                <Badge variant="outline" className={cn("text-[9px]", severity.className)}>
+                                  {severity.label}
+                                </Badge>
+                                <Badge
+                                  variant="outline"
+                                  className={cn(
+                                    "text-[9px]",
+                                    decision === "BLOCK"
+                                      ? "border-red-200 bg-red-50 text-red-700"
+                                      : "border-amber-200 bg-amber-50 text-amber-700"
+                                  )}
+                                >
+                                  {decision}
+                                </Badge>
+                              </div>
+                            </div>
+                          </Link>
+                        )
+                      })
+                    )}
+                  </div>
+                </div>
+              </CardContent>
+            </div>
+          </Card>
+
+          <div className="grid shrink-0 grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            {loading && !data
+              ? Array.from({ length: 4 }).map((_, idx) => (
+                  <Card
+                    key={idx}
+                    className="border border-[#E5E7EB] bg-white shadow-sm"
+                    style={{ height: `${KPI_CARD_HEIGHT}px` }}
+                  >
+                    <CardContent className="flex h-full flex-col items-start justify-start gap-2 px-3 pb-2 pt-2">
+                      <SkeletonBlock className="h-4 w-24" />
+                      <SkeletonBlock className="h-6 w-24" />
+                      <SkeletonBlock className="h-3 w-28" />
+                    </CardContent>
+                  </Card>
+                ))
+              : kpis.map((kpi) => (
+                  <Link key={kpi.label} href={kpi.href} className="group block">
+                    <Card
+                      className="relative overflow-hidden border border-[#E5E7EB] bg-white shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md"
+                      style={{ height: `${KPI_CARD_HEIGHT}px` }}
+                    >
+                      <div className={cn("absolute inset-x-0 top-0 h-1 bg-gradient-to-r", kpi.accentClass)} />
+
+                      <CardContent className="flex h-full min-w-0 flex-col items-start justify-start px-3 pb-2 pt-2">
+                        <div className="flex w-full items-center justify-between gap-2">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <div className="rounded-md bg-slate-50 p-1.5 transition-colors duration-200 group-hover:bg-slate-100">
+                              <kpi.icon className="size-4 text-[#1E3A8A]" />
+                            </div>
+                            <span className="truncate text-[11px] font-medium text-[#6B7280]">{kpi.label}</span>
+                          </div>
+
+                          <ArrowRight className="size-4 shrink-0 text-[#9CA3AF] transition-transform duration-200 group-hover:translate-x-0.5 group-hover:text-[#3B82F6]" />
+                        </div>
+
+                        <div className="mt-1.5 flex min-w-0 flex-col gap-0.5">
+                          <KpiValue
+                            value={kpi.value}
+                            rawNumber={kpi.rawNumber}
+                            suffix={kpi.suffix}
+                            animateNumber={kpi.animateNumber}
+                          />
+                          <span className="line-clamp-1 text-[10px] text-[#9CA3AF]" title={kpi.subText}>
+                            {kpi.subText}
+                          </span>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  </Link>
+                ))}
+          </div>
+
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+            <Link href={`/logs?${logsRangeQuery}`} className="group block">
+              <Card
+                className="flex overflow-hidden border border-[#E5E7EB] bg-white shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md"
+                style={{ height: `${CHART_CARD_HEIGHT}px` }}
+              >
+                <div className="flex h-full w-full flex-col">
+                  <CardHeader className="pb-0.5 pt-2">
+                    <CardTitle className="flex items-center justify-between gap-2 text-sm font-semibold text-[#111827]">
+                      <span>Hourly Detection Pattern</span>
+                      <ArrowRight className="size-4 shrink-0 text-[#9CA3AF] transition-transform duration-200 group-hover:translate-x-0.5 group-hover:text-[#3B82F6]" />
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="min-h-0 flex-1 pt-0.5 pb-2">
+                    {requestsOverTime.length === 0 ? (
+                      <EmptyChartState message="No request trend data." height="h-[150px]" />
+                    ) : (
+                      <ResponsiveContainer width="100%" height={156}>
+                        <LineChart data={requestsOverTime} margin={{ top: 8, right: 8, left: -18, bottom: 6 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke={GG_COLORS.border} />
+                          <XAxis
+                            dataKey="hour"
+                            tick={{ fontSize: 9, fill: GG_COLORS.textSecondary }}
+                            tickLine={false}
+                            axisLine={false}
+                          />
+                          <YAxis
+                            tick={{ fontSize: 9, fill: GG_COLORS.textSecondary }}
+                            tickLine={false}
+                            axisLine={false}
+                          />
+                          <Tooltip contentStyle={chartTooltipStyle} />
+                          <Line
+                            type="monotone"
+                            dataKey="requests"
+                            stroke={GG_COLORS.primary}
+                            strokeWidth={2}
+                            dot={false}
+                          />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    )}
+                  </CardContent>
+                </div>
+              </Card>
+            </Link>
+
+            <Link href={`/logs?stage=AI_STAGE&${logsRangeQuery}`} className="group block">
+              <Card
+                className="flex overflow-hidden border border-[#E5E7EB] bg-white shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md"
+                style={{ height: `${CHART_CARD_HEIGHT}px` }}
+              >
+                <div className="flex h-full w-full flex-col">
+                  <CardHeader className="pb-0.5 pt-2">
+                    <CardTitle className="flex items-center justify-between gap-2 text-sm font-semibold text-[#111827]">
+                      <span>AI Threat Distribution</span>
+                      <ArrowRight className="size-4 shrink-0 text-[#9CA3AF] transition-transform duration-200 group-hover:translate-x-0.5 group-hover:text-[#3B82F6]" />
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="min-h-0 flex-1 pt-0.5 pb-2">
+                    {aiThreatLoading ? (
+                      <EmptyChartState message="Loading AI threat distribution..." height="h-[150px]" />
+                    ) : aiThreatError ? (
+                      <EmptyChartState message={aiThreatError} height="h-[150px]" />
+                    ) : aiThreatDist.length === 0 ? (
+                      <EmptyChartState message="No AI threat distribution data." height="h-[150px]" />
+                    ) : (
+                      <ResponsiveContainer width="100%" height={156}>
+                        <PieChart margin={{ top: 4, right: 4, left: 4, bottom: 18 }}>
+                          <Pie
+                            data={aiThreatDist}
+                            dataKey="count"
+                            nameKey="label"
+                            cx="50%"
+                            cy="42%"
+                            innerRadius={26}
+                            outerRadius={42}
+                            paddingAngle={3}
+                          >
+                            {aiThreatDist.map((entry, index) => (
+                              <Cell key={`${entry.label}-${index}`} fill={getAiThreatColor(entry.label)} />
+                            ))}
+                          </Pie>
+                          <Tooltip
+                            contentStyle={chartTooltipStyle}
+                            formatter={(value: any, _name: any, props: any) => {
+                              const payload = props?.payload
+                              if (!payload) return [value, "Count"]
+                              return [`${payload.count} (${payload.percent}%)`, payload.label]
+                            }}
+                          />
+                          <Legend verticalAlign="bottom" height={26} wrapperStyle={{ fontSize: 10, paddingTop: 6 }} />
+                        </PieChart>
+                      </ResponsiveContainer>
+                    )}
+                  </CardContent>
+                </div>
+              </Card>
+            </Link>
+
+            <Link href={`/logs?${logsRangeQuery}`} className="group block">
+              <Card
+                className="flex overflow-hidden border border-[#E5E7EB] bg-white shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md"
+                style={{ height: `${CHART_CARD_HEIGHT}px` }}
+              >
+                <div className="flex h-full w-full flex-col">
+                  <CardHeader className="pb-0.5 pt-2">
+                    <CardTitle className="flex items-center justify-between gap-2 text-sm font-semibold text-[#111827]">
+                      <span>Decision Distribution</span>
+                      <ArrowRight className="size-4 shrink-0 text-[#9CA3AF] transition-transform duration-200 group-hover:translate-x-0.5 group-hover:text-[#3B82F6]" />
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="min-h-0 flex-1 pt-0.5 pb-2">
+                    {decisionDistribution.length === 0 ? (
+                      <EmptyChartState message="No decision distribution data." height="h-[150px]" />
+                    ) : (
+                      <ResponsiveContainer width="100%" height={156}>
+                        <PieChart margin={{ top: 4, right: 4, left: 4, bottom: 18 }}>
+                          <Pie
+                            data={decisionDistribution}
+                            dataKey="count"
+                            nameKey="decision"
+                            cx="50%"
+                            cy="42%"
+                            innerRadius={26}
+                            outerRadius={42}
+                            paddingAngle={3}
+                          >
+                            {decisionDistribution.map((entry, index) => (
+                              <Cell key={`${entry.decision}-${index}`} fill={getDecisionColor(entry.decision)} />
+                            ))}
+                          </Pie>
+                          <Tooltip contentStyle={chartTooltipStyle} />
+                          <Legend verticalAlign="bottom" height={26} wrapperStyle={{ fontSize: 10, paddingTop: 6 }} />
+                        </PieChart>
+                      </ResponsiveContainer>
+                    )}
+                  </CardContent>
+                </div>
+              </Card>
+            </Link>
+          </div>
+        </div>
+
+        <div className="grid min-h-0 gap-2 xl:grid-cols-4">
+          <Card
+            className="flex overflow-hidden border border-[#E5E7EB] bg-white shadow-sm"
+            style={{ height: `${BOTTOM_CARD_HEIGHT}px` }}
+          >
+            <div className="flex h-full w-full flex-col">
+              <CardHeader className="pb-0.5 pt-2">
+                <CardTitle className="text-sm font-semibold text-[#111827]">Top Threat Sources</CardTitle>
+              </CardHeader>
+              <CardContent className="flex-1 pt-0.5 pb-2">
+                <div className="flex h-full flex-col gap-1.5">
+                  {topClientIps.length === 0 ? (
+                    <div className="flex h-full items-center justify-center text-xs text-[#6B7280]">
+                      No attacker data.
+                    </div>
+                  ) : (
+                    topClientIps.slice(0, 3).map((item, index) => (
+                      <Link
+                        key={`${item.client_ip}-${index}`}
+                        href={`/logs?client_ip=${encodeURIComponent(item.client_ip)}&${logsRangeQuery}`}
+                        className="flex items-center justify-between rounded-md border border-[#E5E7EB] bg-[#F8FAFC] px-2 py-1.5 text-[10px] transition-colors hover:bg-slate-50"
+                      >
+                        <span className="truncate font-mono text-[#111827]">
+                          {index + 1}. {item.client_ip}
+                        </span>
+                        <span className="ml-2 shrink-0 font-mono text-[#6B7280]">{item.count}</span>
+                      </Link>
+                    ))
+                  )}
+                </div>
+              </CardContent>
+            </div>
+          </Card>
+
+          <Card
+            className="flex overflow-hidden border border-[#E5E7EB] bg-white shadow-sm"
+            style={{ height: `${BOTTOM_CARD_HEIGHT}px` }}
+          >
+            <div className="flex h-full w-full flex-col">
+              <CardHeader className="pb-0.5 pt-2">
+                <CardTitle className="text-sm font-semibold text-[#111827]">Top Target Hosts</CardTitle>
+              </CardHeader>
+              <CardContent className="flex-1 pt-0.5 pb-2">
+                <div className="flex h-full flex-col gap-1.5">
+                  {topHosts.length === 0 ? (
+                    <div className="flex h-full items-center justify-center text-xs text-[#6B7280]">
+                      No target host data.
+                    </div>
+                  ) : (
+                    topHosts.slice(0, 3).map((item: any, index: number) => (
+                      <Link
+                        key={`${item.host}-${index}`}
+                        href={`/logs?host=${encodeURIComponent(item.host || "")}&${logsRangeQuery}`}
+                        className="rounded-md border border-[#E5E7EB] bg-[#F8FAFC] px-2 py-1.5 transition-colors hover:bg-slate-50"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="truncate text-[10px] font-medium text-[#111827]">
+                            {index + 1}. {item.host || "Unknown Host"}
+                          </span>
+                          <span className="shrink-0 text-[10px] font-mono text-[#6B7280]">{item.count}</span>
+                        </div>
+                      </Link>
+                    ))
+                  )}
+                </div>
+              </CardContent>
+            </div>
+          </Card>
+
+          <Card
+            className="flex overflow-hidden border border-[#E5E7EB] bg-white shadow-sm"
+            style={{ height: `${BOTTOM_CARD_HEIGHT}px` }}
+          >
+            <div className="flex h-full w-full flex-col">
+              <CardHeader className="pb-0.5 pt-2">
+                <CardTitle className="text-sm font-semibold text-[#111827]">Top Risk Paths</CardTitle>
+              </CardHeader>
+              <CardContent className="flex-1 pt-0.5 pb-2">
+                <div className="flex h-full flex-col gap-1.5">
+                  {topPaths.length === 0 ? (
+                    <div className="flex h-full items-center justify-center text-xs text-[#6B7280]">
+                      No target path data.
+                    </div>
+                  ) : (
+                    topPaths.slice(0, 3).map((item: any, index: number) => (
+                      <Link
+                        key={`${item.path}-${index}`}
+                        href={`/logs?path=${encodeURIComponent(item.path || "")}&${logsRangeQuery}`}
+                        className="rounded-md border border-[#E5E7EB] bg-[#F8FAFC] px-2 py-1.5 transition-colors hover:bg-slate-50"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="truncate text-[10px] font-medium text-[#111827]">
+                            {index + 1}. {item.path || "/"}
+                          </span>
+                          <span className="shrink-0 text-[10px] font-mono text-[#6B7280]">{item.count}</span>
+                        </div>
+                      </Link>
+                    ))
+                  )}
+                </div>
+              </CardContent>
+            </div>
+          </Card>
+
+          <Link href={`/logs?decision=BLOCK&${logsRangeQuery}`} className="group block">
+            <Card
+              className="flex overflow-hidden border border-[#E5E7EB] bg-white shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md"
+              style={{ height: `${BOTTOM_CARD_HEIGHT}px` }}
+            >
+              <div className="flex h-full w-full flex-col">
+                <CardHeader className="pb-0.5 pt-2">
+                  <CardTitle className="flex items-center justify-between gap-2 text-sm font-semibold text-[#111827]">
+                    <span className="flex items-center gap-2">
+                      <ShieldOff className="size-4 text-[#1E3A8A]" />
+                      Enforcement Split
+                    </span>
+                    <ArrowRight className="size-4 shrink-0 text-[#9CA3AF] transition-transform duration-200 group-hover:translate-x-0.5 group-hover:text-[#3B82F6]" />
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="min-h-0 flex-1 pt-0.5 pb-2">
+                  {policyVsAiComposition.length === 0 ? (
+                    <EmptyChartState message="No enforcement data." height="h-[108px]" />
+                  ) : (
+                    <ResponsiveContainer width="100%" height={108}>
+                      <BarChart data={policyVsAiComposition} margin={{ top: 8, right: 8, left: -18, bottom: 2 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke={GG_COLORS.border} />
+                        <XAxis
+                          dataKey="label"
+                          tick={{ fontSize: 9, fill: GG_COLORS.textSecondary }}
+                          tickLine={false}
+                          axisLine={false}
+                        />
+                        <YAxis
+                          tick={{ fontSize: 9, fill: GG_COLORS.textSecondary }}
+                          tickLine={false}
+                          axisLine={false}
+                        />
+                        <Tooltip contentStyle={chartTooltipStyle} />
+                        <Bar dataKey="count" radius={[4, 4, 0, 0]} maxBarSize={36}>
+                          {policyVsAiComposition.map((entry, index) => (
+                            <Cell
+                              key={`${entry.label}-${index}`}
+                              fill={entry.label === "AI Blocks" ? GG_COLORS.ai : GG_COLORS.primary}
+                            />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  )}
+                </CardContent>
+              </div>
+            </Card>
+          </Link>
+        </div>
+
+        <div className="grid min-h-0 gap-2 xl:grid-cols-4">
+          {triageItems.map((item) => (
+            <Link key={item.label} href={item.href} className="group block">
+              <Card
+                className="flex overflow-hidden border border-[#E5E7EB] bg-white shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md"
+                style={{ height: `${TRIAGE_ROW_HEIGHT}px` }}
+              >
+                <CardContent className="flex h-full flex-col justify-between px-3 pb-2.5 pt-2.5">
+                  <div className="min-w-0">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="truncate text-[10px] font-semibold text-[#111827]">{item.label}</div>
+                      <ArrowRight className="size-3.5 shrink-0 text-[#9CA3AF] transition-transform duration-200 group-hover:translate-x-0.5 group-hover:text-[#3B82F6]" />
+                    </div>
+
+                    <div className="mt-1 text-[18px] font-bold leading-none tracking-tight text-[#111827]">
+                      {item.value}
+                    </div>
+                    <div className="mt-1 text-[10px] text-[#6B7280]">{item.countLabel}</div>
+                    <div className="mt-1 line-clamp-1 text-[9px] text-[#9CA3AF]">{item.description}</div>
+                  </div>
+
+                  <div className="mt-2">
+                    <div className="mb-1 flex items-center justify-between text-[9px]">
+                      <span className="text-[#6B7280]">Coverage</span>
+                      <span className="font-medium text-[#111827]">{item.barWidth.toFixed(1)}%</span>
+                    </div>
+
+                    <div className="h-1.5 overflow-hidden rounded-full bg-slate-200">
+                      <div
+                        className={cn("h-full rounded-full transition-all duration-500", item.barClass)}
+                        style={{ width: `${Math.max(0, Math.min(item.barWidth, 100))}%` }}
+                      />
+                    </div>
+                  </div>
                 </CardContent>
               </Card>
-            ))
-          : kpis.map((kpi) => (
-              <Link key={kpi.label} href={kpi.href} className="group block">
-                <Card className="relative overflow-hidden border border-[#E5E7EB] bg-white shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md">
-                  <div className={cn("h-1 w-full bg-gradient-to-r", kpi.accentClass)} />
-
-                  <CardContent className="flex min-w-0 flex-col gap-1.5 p-2.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex min-w-0 items-center gap-2">
-                        <div className="rounded-md bg-slate-50 p-1.5 transition-colors duration-200 group-hover:bg-slate-100">
-                          <kpi.icon className="size-4 text-[#1E3A8A]" />
-                        </div>
-                        <span className="truncate text-[11px] font-medium text-[#6B7280]">{kpi.label}</span>
-                      </div>
-
-                      <ArrowRight className="size-4 shrink-0 text-[#9CA3AF] transition-transform duration-200 group-hover:translate-x-0.5 group-hover:text-[#3B82F6]" />
-                    </div>
-
-                    <div className="flex min-w-0 flex-col gap-0.5">
-                      <KpiValue
-                        value={kpi.value}
-                        rawNumber={kpi.rawNumber}
-                        suffix={kpi.suffix}
-                        animateNumber={kpi.animateNumber}
-                      />
-                      <span className="truncate text-[10px] text-[#9CA3AF]" title={kpi.subText}>
-                        {kpi.subText}
-                      </span>
-                    </div>
-                  </CardContent>
-                </Card>
-              </Link>
-            ))}
-      </div>
-
-	  <div className="grid min-h-0 flex-1 gap-2">
-  <div className="grid min-h-0 gap-2 xl:grid-cols-4">
-    <Card className="h-[240px] border border-[#E5E7EB] bg-white shadow-sm">
-      <CardHeader className="pb-1 pt-2.5">
-        <CardTitle className="flex items-center gap-2 text-sm font-semibold text-[#111827]">
-          <BellRing className="size-4 text-[#1E3A8A]" />
-          Live Threat Feed
-        </CardTitle>
-      </CardHeader>
-
-      <CardContent className="flex h-[calc(100%-44px)] flex-col pt-0">
-        <div className="grid shrink-0 grid-cols-2 gap-1.5">
-          <div className="rounded-lg border border-[#E5E7EB] bg-[#F8FAFC] px-2 py-1.5">
-            <div className="text-[10px] text-[#6B7280]">Window</div>
-            <div className="text-sm font-semibold text-[#111827]">{lastHours}h</div>
-          </div>
-          <div className="rounded-lg border border-[#E5E7EB] bg-[#F8FAFC] px-2 py-1.5">
-            <div className="text-[10px] text-[#6B7280]">Alerts</div>
-            <div className="text-sm font-semibold text-[#111827]">{criticalEvents.length}</div>
-          </div>
-        </div>
-
-        <div className="mt-2 min-h-0 flex-1 overflow-y-auto pr-1">
-          <div className="flex flex-col gap-1">
-            {criticalEvents.length === 0 ? (
-              <div className="flex h-full min-h-[120px] items-center justify-center rounded-md border border-dashed border-[#E5E7EB] text-xs text-[#6B7280]">
-                No active alerts.
-              </div>
-            ) : (
-              criticalEvents.slice(0, 3).map((item, index) => {
-                const decision = String(item.decision || "UNKNOWN").toUpperCase()
-                const severity = getSeverityInfo(item)
-
-                return (
-                  <Link
-                    key={`${item.request_id ?? "evt"}-${index}`}
-                    href="/logs"
-                    className={cn(
-                      "rounded-md border px-2 py-1.5 transition-colors",
-                      getRecentEventRowClass(item)
-                    )}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <div className="truncate text-[10px] font-semibold text-[#111827]">
-                          {item.host || "Unknown Host"}
-                        </div>
-                        <div className="truncate text-[9px] text-[#6B7280]">
-                          {item.path || "/"} · {item.client_ip || "N/A"}
-                        </div>
-                        <div className="mt-0.5 text-[9px] text-[#9CA3AF]">{getEventTimestamp(item)}</div>
-                      </div>
-
-                      <div className="flex shrink-0 flex-col items-end gap-1">
-                        <Badge variant="outline" className={cn("text-[9px]", severity.className)}>
-                          {severity.label}
-                        </Badge>
-                        <Badge
-                          variant="outline"
-                          className={cn(
-                            "text-[9px]",
-                            decision === "BLOCK"
-                              ? "border-red-200 bg-red-50 text-red-700"
-                              : "border-amber-200 bg-amber-50 text-amber-700"
-                          )}
-                        >
-                          {decision}
-                        </Badge>
-                      </div>
-                    </div>
-                  </Link>
-                )
-              })
-            )}
-          </div>
-        </div>
-      </CardContent>
-    </Card>
-
-    <Card className="h-[240px] border border-[#E5E7EB] bg-white shadow-sm">
-      <CardHeader className="pb-1 pt-2.5">
-        <CardTitle className="text-sm font-semibold text-[#111827]">Hourly Detection Pattern</CardTitle>
-      </CardHeader>
-      <CardContent className="pt-0">
-        {requestsOverTime.length === 0 ? (
-          <EmptyChartState message="No request trend data." height="h-[160px]" />
-        ) : (
-          <ResponsiveContainer width="100%" height={170}>
-            <LineChart
-              data={requestsOverTime}
-              margin={{ top: 8, right: 8, left: -18, bottom: 8 }}
-            >
-              <CartesianGrid strokeDasharray="3 3" stroke={GG_COLORS.border} />
-              <XAxis
-                dataKey="hour"
-                tick={{ fontSize: 9, fill: GG_COLORS.textSecondary }}
-                tickLine={false}
-                axisLine={false}
-              />
-              <YAxis
-                tick={{ fontSize: 9, fill: GG_COLORS.textSecondary }}
-                tickLine={false}
-                axisLine={false}
-              />
-              <Tooltip contentStyle={chartTooltipStyle} />
-              <Line
-                type="monotone"
-                dataKey="requests"
-                stroke={GG_COLORS.primary}
-                strokeWidth={2}
-                dot={false}
-              />
-            </LineChart>
-          </ResponsiveContainer>
-        )}
-      </CardContent>
-    </Card>
-
-    <Card className="h-[240px] border border-[#E5E7EB] bg-white shadow-sm">
-      <CardHeader className="pb-1 pt-2.5">
-        <CardTitle className="text-sm font-semibold text-[#111827]">AI Threat Distribution</CardTitle>
-      </CardHeader>
-      <CardContent className="pt-0">
-        {aiThreatLoading ? (
-          <EmptyChartState message="Loading AI threat distribution..." height="h-[160px]" />
-        ) : aiThreatError ? (
-          <EmptyChartState message={aiThreatError} height="h-[160px]" />
-        ) : aiThreatDist.length === 0 ? (
-          <EmptyChartState message="No AI threat distribution data." height="h-[160px]" />
-        ) : (
-          <ResponsiveContainer width="100%" height={170}>
-            <PieChart margin={{ top: 4, right: 4, left: 4, bottom: 20 }}>
-              <Pie
-                data={aiThreatDist}
-                dataKey="count"
-                nameKey="label"
-                cx="50%"
-                cy="42%"
-                innerRadius={28}
-                outerRadius={44}
-                paddingAngle={3}
-              >
-                {aiThreatDist.map((entry, index) => (
-                  <Cell key={`${entry.label}-${index}`} fill={getAiThreatColor(entry.label)} />
-                ))}
-              </Pie>
-              <Tooltip
-                contentStyle={chartTooltipStyle}
-                formatter={(value: any, _name: any, props: any) => {
-                  const payload = props?.payload
-                  if (!payload) return [value, "Count"]
-                  return [`${payload.count} (${payload.percent}%)`, payload.label]
-                }}
-              />
-              <Legend
-                verticalAlign="bottom"
-                height={28}
-                wrapperStyle={{ fontSize: 10, paddingTop: 8 }}
-              />
-            </PieChart>
-          </ResponsiveContainer>
-        )}
-      </CardContent>
-    </Card>
-
-    <Card className="h-[240px] border border-[#E5E7EB] bg-white shadow-sm">
-      <CardHeader className="pb-1 pt-2.5">
-        <CardTitle className="text-sm font-semibold text-[#111827]">Decision Distribution</CardTitle>
-      </CardHeader>
-      <CardContent className="pt-0">
-        {decisionDistribution.length === 0 ? (
-          <EmptyChartState message="No decision distribution data." height="h-[160px]" />
-        ) : (
-          <ResponsiveContainer width="100%" height={170}>
-            <PieChart margin={{ top: 4, right: 4, left: 4, bottom: 20 }}>
-              <Pie
-                data={decisionDistribution}
-                dataKey="count"
-                nameKey="decision"
-                cx="50%"
-                cy="42%"
-                innerRadius={28}
-                outerRadius={44}
-                paddingAngle={3}
-              >
-                {decisionDistribution.map((entry, index) => (
-                  <Cell key={`${entry.decision}-${index}`} fill={getDecisionColor(entry.decision)} />
-                ))}
-              </Pie>
-              <Tooltip contentStyle={chartTooltipStyle} />
-              <Legend
-                verticalAlign="bottom"
-                height={28}
-                wrapperStyle={{ fontSize: 10, paddingTop: 8 }}
-              />
-            </PieChart>
-          </ResponsiveContainer>
-        )}
-      </CardContent>
-    </Card>
-  </div>
-
-  <div className="grid min-h-0 gap-2 xl:grid-cols-4">
-	  
-          <Card className="h-[220px] border border-[#E5E7EB] bg-white shadow-sm">
-            <CardHeader className="pb-1 pt-2.5">
-              <CardTitle className="text-sm font-semibold text-[#111827]">Top Threat Sources</CardTitle>
-            </CardHeader>
-            <CardContent className="pt-0">
-              <div className="flex h-[150px] flex-col gap-1 overflow-hidden">
-                {topClientIps.length === 0 ? (
-                  <div className="flex h-full items-center justify-center text-xs text-[#6B7280]">
-                    No attacker data.
-                  </div>
-                ) : (
-                  topClientIps.slice(0, 4).map((item, index) => (
-                    <Link
-                      key={`${item.client_ip}-${index}`}
-                      href={`/logs?client_ip=${encodeURIComponent(item.client_ip)}`}
-                      className="flex items-center justify-between rounded-md border border-[#E5E7EB] bg-[#F8FAFC] px-2 py-1.5 text-[10px] transition-colors hover:bg-slate-50"
-                    >
-                      <span className="truncate font-mono text-[#111827]">
-                        {index + 1}. {item.client_ip}
-                      </span>
-                      <span className="ml-2 shrink-0 font-mono text-[#6B7280]">{item.count}</span>
-                    </Link>
-                  ))
-                )}
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card className="h-[220px] border border-[#E5E7EB] bg-white shadow-sm">
-            <CardHeader className="pb-1 pt-2.5">
-              <CardTitle className="text-sm font-semibold text-[#111827]">Top Target Hosts</CardTitle>
-            </CardHeader>
-            <CardContent className="pt-0">
-              <div className="flex h-[150px] flex-col gap-1 overflow-hidden">
-                {topHosts.length === 0 ? (
-                  <div className="flex h-full items-center justify-center text-xs text-[#6B7280]">
-                    No target host data.
-                  </div>
-                ) : (
-                  topHosts.slice(0, 4).map((item: any, index: number) => (
-                    <Link
-                      key={`${item.host}-${index}`}
-                      href={`/logs?host=${encodeURIComponent(item.host || "")}`}
-                      className="rounded-md border border-[#E5E7EB] bg-[#F8FAFC] px-2 py-1.5 transition-colors hover:bg-slate-50"
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="truncate text-[10px] font-medium text-[#111827]">
-                          {index + 1}. {item.host || "Unknown Host"}
-                        </span>
-                        <span className="shrink-0 text-[10px] font-mono text-[#6B7280]">{item.count}</span>
-                      </div>
-                    </Link>
-                  ))
-                )}
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card className="h-[220px] border border-[#E5E7EB] bg-white shadow-sm">
-            <CardHeader className="pb-1 pt-2.5">
-              <CardTitle className="text-sm font-semibold text-[#111827]">Top Risk Paths</CardTitle>
-            </CardHeader>
-            <CardContent className="pt-0">
-              <div className="flex h-[150px] flex-col gap-1 overflow-hidden">
-                {topPaths.length === 0 ? (
-                  <div className="flex h-full items-center justify-center text-xs text-[#6B7280]">
-                    No target path data.
-                  </div>
-                ) : (
-                  topPaths.slice(0, 4).map((item: any, index: number) => (
-                    <Link
-                      key={`${item.path}-${index}`}
-                      href={`/logs?path=${encodeURIComponent(item.path || "")}`}
-                      className="rounded-md border border-[#E5E7EB] bg-[#F8FAFC] px-2 py-1.5 transition-colors hover:bg-slate-50"
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="truncate text-[10px] font-medium text-[#111827]">
-                          {index + 1}. {item.path || "/"}
-                        </span>
-                        <span className="shrink-0 text-[10px] font-mono text-[#6B7280]">{item.count}</span>
-                      </div>
-                    </Link>
-                  ))
-                )}
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card className="h-[220px] border border-[#E5E7EB] bg-white shadow-sm">
-            <CardHeader className="pb-1 pt-2.5">
-              <CardTitle className="flex items-center gap-2 text-sm font-semibold text-[#111827]">
-                <ShieldOff className="size-4 text-[#1E3A8A]" />
-                Enforcement Split
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="pt-0">
-              {policyVsAiComposition.length === 0 ? (
-                <EmptyChartState message="No enforcement data." height="h-[150px]" />
-              ) : (
-                <ResponsiveContainer width="100%" height={160}>
-                  <BarChart
-                    data={policyVsAiComposition}
-                    margin={{ top: 8, right: 8, left: -18, bottom: 8 }}
-                  >
-                    <CartesianGrid strokeDasharray="3 3" stroke={GG_COLORS.border} />
-                    <XAxis
-                      dataKey="label"
-                      tick={{ fontSize: 9, fill: GG_COLORS.textSecondary }}
-                      tickLine={false}
-                      axisLine={false}
-                    />
-                    <YAxis
-                      tick={{ fontSize: 9, fill: GG_COLORS.textSecondary }}
-                      tickLine={false}
-                      axisLine={false}
-                    />
-                    <Tooltip contentStyle={chartTooltipStyle} />
-                    <Bar dataKey="count" radius={[4, 4, 0, 0]}>
-                      {policyVsAiComposition.map((entry, index) => (
-                        <Cell
-                          key={`${entry.label}-${index}`}
-                          fill={entry.label === "AI Blocks" ? GG_COLORS.ai : GG_COLORS.primary}
-                        />
-                      ))}
-                    </Bar>
-                  </BarChart>
-                </ResponsiveContainer>
-              )}
-            </CardContent>
-          </Card>
+            </Link>
+          ))}
         </div>
       </div>
     </div>
