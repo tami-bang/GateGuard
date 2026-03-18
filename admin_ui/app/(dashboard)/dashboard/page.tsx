@@ -541,6 +541,10 @@ export default function DashboardPage() {
       .slice(0, 3)
   }, [recentEvents])
 
+  const alertCount = useMemo(() => {
+    return Number(summary?.open_incidents ?? criticalEvents.length)
+  }, [summary?.open_incidents, criticalEvents.length])
+
   const kpis = useMemo<KpiItem[]>(() => {
     return [
       {
@@ -761,11 +765,11 @@ export default function DashboardPage() {
                   </Link>
 
                   <Link
-                    href={`/logs?decision=BLOCK&${logsRangeQuery}`}
+                    href={`/incidents?status=OPEN`}
                     className="rounded-lg border border-[#E5E7EB] bg-[#F8FAFC] px-2 py-1.5 transition-colors hover:bg-slate-50"
                   >
                     <div className="text-[10px] text-[#6B7280]">Alerts</div>
-                    <div className="text-sm font-semibold text-[#111827]">{criticalEvents.length}</div>
+                    <div className="text-sm font-semibold text-[#111827]">{alertCount}</div>
                   </Link>
                 </div>
 

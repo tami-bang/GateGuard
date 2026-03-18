@@ -1,7 +1,8 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
+import { usePathname, useRouter, useSearchParams } from "next/navigation"
 
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -19,17 +20,9 @@ import {
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb"
 
-import {
-  AlertTriangle,
-  Clock3,
-  CheckCircle2,
-  ArrowRight,
-} from "lucide-react"
+import { AlertTriangle, Clock3, CheckCircle2, ArrowRight } from "lucide-react"
 
-import {
-  apiListIncidents,
-  type ReviewEvent,
-} from "@/lib/api-client"
+import { apiListIncidents, type ReviewEvent } from "@/lib/api-client"
 
 type IncidentStatusTab = "OPEN" | "IN_PROGRESS" | "CLOSED"
 
@@ -41,7 +34,61 @@ type SummaryCardItem = {
   subText: string
 }
 
+type IncidentListCache = {
+  items: ReviewEvent[]
+  total: number
+  summaryCounts: Record<IncidentStatusTab, number>
+}
+
+type CachedIncidentList = {
+  payload: IncidentListCache
+  requestKey: string
+}
+
 const PAGE_SIZE = 10
+const CACHE_TTL_MS = 45_000
+const SUMMARY_CACHE_KEY = "gateguard:incidents:summary"
+
+type SessionCacheEnvelope<T> = {
+  savedAt: number
+  data: T
+}
+
+function readSessionCache<T>(key: string): T | null {
+  if (typeof window === "undefined") return null
+
+  const raw = window.sessionStorage.getItem(key)
+  if (!raw) return null
+
+  try {
+    const parsed = JSON.parse(raw) as SessionCacheEnvelope<T>
+    if (!parsed || typeof parsed !== "object") {
+      window.sessionStorage.removeItem(key)
+      return null
+    }
+
+    if (typeof parsed.savedAt !== "number" || Date.now() - parsed.savedAt > CACHE_TTL_MS) {
+      window.sessionStorage.removeItem(key)
+      return null
+    }
+
+    return parsed.data ?? null
+  } catch {
+    window.sessionStorage.removeItem(key)
+    return null
+  }
+}
+
+function writeSessionCache<T>(key: string, data: T) {
+  if (typeof window === "undefined") return
+
+  const payload: SessionCacheEnvelope<T> = {
+    savedAt: Date.now(),
+    data,
+  }
+
+  window.sessionStorage.setItem(key, JSON.stringify(payload))
+}
 
 function fmt(ts: string | null | undefined): string {
   if (!ts) return "—"
@@ -86,7 +133,29 @@ function getActionBadgeClass(action: string | null | undefined): string {
   return "border-slate-200 bg-slate-100 text-slate-600"
 }
 
+function normalizeStatusParam(value: string | null): IncidentStatusTab {
+  if (value === "OPEN" || value === "IN_PROGRESS" || value === "CLOSED") return value
+  return "OPEN"
+}
+
+function normalizePageParam(value: string | null): number {
+  if (!value) return 1
+  const n = Number(value)
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1
+}
+
+function buildIncidentsQuery(status: IncidentStatusTab, page: number): string {
+  const qs = new URLSearchParams()
+  if (status !== "OPEN") qs.set("status", status)
+  if (page > 1) qs.set("page", String(page))
+  return qs.toString()
+}
+
 export default function IncidentsPage() {
+  const router = useRouter()
+  const pathname = usePathname()
+  const searchParams = useSearchParams()
+
   const [activeTab, setActiveTab] = useState<IncidentStatusTab>("OPEN")
   const [page, setPage] = useState(1)
 
@@ -99,16 +168,99 @@ export default function IncidentsPage() {
     CLOSED: 0,
   })
 
-  const [loading, setLoading] = useState(true)
+  const [initialLoading, setInitialLoading] = useState(true)
+  const [tableLoading, setTableLoading] = useState(false)
   const [summaryLoading, setSummaryLoading] = useState(true)
   const [error, setError] = useState("")
+
+  const didHydrateFromUrl = useRef(false)
+  const didInitialLoad = useRef(false)
+  const restoredFromCacheRef = useRef(false)
+  const restoredRequestKeyRef = useRef("")
+  const summaryCountsRef = useRef(summaryCounts)
+  const lastUrlSnapshotRef = useRef("")
+
+  useEffect(() => {
+    summaryCountsRef.current = summaryCounts
+  }, [summaryCounts])
+
+  useEffect(() => {
+    const nextStatus = normalizeStatusParam(searchParams.get("status"))
+    const nextPage = normalizePageParam(searchParams.get("page"))
+
+    const snapshot = JSON.stringify({
+      status: nextStatus,
+      page: nextPage,
+    })
+
+    if (lastUrlSnapshotRef.current === snapshot) {
+      didHydrateFromUrl.current = true
+      return
+    }
+
+    lastUrlSnapshotRef.current = snapshot
+
+    setActiveTab((prev) => (prev === nextStatus ? prev : nextStatus))
+    setPage((prev) => (prev === nextPage ? prev : nextPage))
+    didHydrateFromUrl.current = true
+  }, [searchParams])
+
+  const listQueryString = useMemo(() => buildIncidentsQuery(activeTab, page), [activeTab, page])
+
+  const currentListHref = useMemo(() => {
+    return listQueryString ? `${pathname}?${listQueryString}` : pathname
+  }, [pathname, listQueryString])
+
+  const cacheKey = useMemo(() => `gateguard:incidents:${currentListHref}`, [currentListHref])
+
+  useEffect(() => {
+    if (!didHydrateFromUrl.current) return
+
+    const current = searchParams.toString()
+    if (current === listQueryString) return
+
+    router.replace(listQueryString ? `${pathname}?${listQueryString}` : pathname, { scroll: false })
+  }, [listQueryString, pathname, router, searchParams])
+
+  useEffect(() => {
+    const cached = readSessionCache<CachedIncidentList>(cacheKey)
+
+    if (!cached?.payload) {
+      restoredFromCacheRef.current = false
+      restoredRequestKeyRef.current = ""
+      return
+    }
+
+    setItems(cached.payload.items ?? [])
+    setTotal(cached.payload.total ?? 0)
+
+    if (cached.payload.summaryCounts) {
+      setSummaryCounts(cached.payload.summaryCounts)
+      setSummaryLoading(false)
+    }
+
+    setInitialLoading(false)
+    setTableLoading(false)
+    setError("")
+    didInitialLoad.current = true
+    restoredFromCacheRef.current = true
+    restoredRequestKeyRef.current = cached.requestKey || ""
+  }, [cacheKey])
 
   useEffect(() => {
     let alive = true
 
+    const cachedSummary = readSessionCache<Record<IncidentStatusTab, number>>(SUMMARY_CACHE_KEY)
+    if (cachedSummary) {
+      setSummaryCounts(cachedSummary)
+      setSummaryLoading(false)
+    }
+
     async function loadSummary() {
       try {
-        setSummaryLoading(true)
+        if (!cachedSummary) {
+          setSummaryLoading(true)
+        }
 
         const [openRes, inProgressRes, closedRes] = await Promise.all([
           apiListIncidents({ status: "OPEN", limit: 1, page: 1 }),
@@ -118,11 +270,14 @@ export default function IncidentsPage() {
 
         if (!alive) return
 
-        setSummaryCounts({
+        const nextSummaryCounts: Record<IncidentStatusTab, number> = {
           OPEN: openRes.total ?? 0,
           IN_PROGRESS: inProgressRes.total ?? 0,
           CLOSED: closedRes.total ?? 0,
-        })
+        }
+
+        setSummaryCounts(nextSummaryCounts)
+        writeSessionCache(SUMMARY_CACHE_KEY, nextSummaryCounts)
       } catch {
         if (!alive) return
       } finally {
@@ -138,12 +293,28 @@ export default function IncidentsPage() {
     }
   }, [])
 
+  const requestKey = useMemo(() => JSON.stringify({ status: activeTab, page, sort: "created_at", dir: "desc", limit: PAGE_SIZE }), [activeTab, page])
+
   useEffect(() => {
     let alive = true
 
     async function load() {
       try {
-        setLoading(true)
+        if (restoredRequestKeyRef.current && restoredRequestKeyRef.current === requestKey) {
+          restoredFromCacheRef.current = false
+          return
+        }
+
+        if (restoredFromCacheRef.current) {
+          restoredFromCacheRef.current = false
+        }
+
+        if (didInitialLoad.current) {
+          setTableLoading(true)
+        } else {
+          setInitialLoading(true)
+        }
+
         setError("")
 
         const res = await apiListIncidents({
@@ -158,12 +329,26 @@ export default function IncidentsPage() {
 
         setItems(res.items ?? [])
         setTotal(res.total ?? 0)
+        didInitialLoad.current = true
+
+        const cached: IncidentListCache = {
+          items: res.items ?? [],
+          total: res.total ?? 0,
+          summaryCounts: summaryCountsRef.current,
+        }
+
+        writeSessionCache<CachedIncidentList>(cacheKey, {
+          payload: cached,
+          requestKey,
+        })
+        restoredRequestKeyRef.current = requestKey
       } catch (e: any) {
         if (!alive) return
         setError(e?.message ?? "Failed to load incidents")
       } finally {
         if (!alive) return
-        setLoading(false)
+        setInitialLoading(false)
+        setTableLoading(false)
       }
     }
 
@@ -172,7 +357,7 @@ export default function IncidentsPage() {
     return () => {
       alive = false
     }
-  }, [activeTab, page])
+  }, [activeTab, page, cacheKey, requestKey])
 
   const totalPages = useMemo(() => {
     return Math.max(1, Math.ceil(total / PAGE_SIZE))
@@ -223,13 +408,9 @@ export default function IncidentsPage() {
       </Breadcrumb>
 
       <div>
-        <h1 className="text-xl font-semibold text-[#111827]">
-          Incidents (Review Queue)
-        </h1>
+        <h1 className="text-xl font-semibold text-[#111827]">Incidents (Review Queue)</h1>
         <p className="text-sm text-[#6B7280]">
-          {loading
-            ? "Loading incidents..."
-            : `${activeTab.replace("_", " ")} · ${total.toLocaleString()} total`}
+          {initialLoading ? "Loading incidents..." : `${activeTab.replace("_", " ")} · ${total.toLocaleString()} total`}
         </p>
       </div>
 
@@ -300,118 +481,125 @@ export default function IncidentsPage() {
           </TabsTrigger>
         </TabsList>
 
-        <Card className="overflow-hidden border border-[#E5E7EB] bg-white shadow-sm">
-          <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow className="bg-[#F8FAFC]">
-                  <TableHead className="text-[11px]">Created</TableHead>
-                  <TableHead className="text-[11px]">Log ID</TableHead>
-                  <TableHead className="text-[11px]">Status</TableHead>
-                  <TableHead className="text-[11px]">Reviewer</TableHead>
-                  <TableHead className="text-[11px]">Proposed</TableHead>
-                  <TableHead className="text-[11px]">Generated Policy</TableHead>
-                  <TableHead className="text-[11px]">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-
-              <TableBody>
-                {loading ? (
-                  <TableRow>
-                    <TableCell colSpan={7} className="py-8 text-center text-sm text-[#6B7280]">
-                      Loading incidents...
-                    </TableCell>
-                  </TableRow>
-                ) : items.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={7} className="py-8 text-center text-sm text-[#6B7280]">
-                      No incidents with status {activeTab.replace("_", " ")}
-                    </TableCell>
-                  </TableRow>
-                ) : (
-                  items.map((rev) => (
-                    <TableRow
-                      key={rev.review_id}
-                      className={cn("text-xs transition-colors duration-150", getIncidentRowClass(rev))}
-                    >
-                      <TableCell className="font-mono text-[11px] text-[#6B7280]">
-                        {fmt(rev.created_at)}
-                      </TableCell>
-
-                      <TableCell>
-                        <Link
-                          href={`/logs/${rev.log_id}`}
-                          className="font-mono text-primary hover:underline"
-                        >
-                          {rev.log_id}
-                        </Link>
-                      </TableCell>
-
-                      <TableCell>
-                        <StatusChip value={rev.status} type="review" size="sm" />
-                      </TableCell>
-
-                      <TableCell className="text-[11px] text-[#6B7280]">
-                        {rev.reviewer_id ?? "—"}
-                      </TableCell>
-
-                      <TableCell>
-                        {rev.proposed_action ? (
-                          <span
-                            className={cn(
-                              "inline-flex items-center rounded-md border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
-                              getActionBadgeClass(rev.proposed_action)
-                            )}
-                          >
-                            {rev.proposed_action.replace(/_/g, " ")}
-                          </span>
-                        ) : (
-                          <span className="text-[11px] text-[#6B7280]">—</span>
-                        )}
-                      </TableCell>
-
-                      <TableCell className="text-[11px]">
-                        {rev.generated_policy_id ? (
-                          <Link
-                            href={`/policies/${rev.generated_policy_id}`}
-                            className="font-mono text-primary hover:underline"
-                          >
-                            {rev.generated_policy_id}
-                          </Link>
-                        ) : (
-                          "—"
-                        )}
-                      </TableCell>
-
-                      <TableCell>
-                        <Link href={`/incidents/${rev.review_id}`}>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-7 px-2 text-xs text-[#1E3A8A] transition-colors hover:bg-slate-100 hover:text-[#2563EB]"
-                          >
-                            Detail
-                          </Button>
-                        </Link>
-                      </TableCell>
-                    </TableRow>
-                  ))
+        {initialLoading ? (
+          <Card className="overflow-hidden border border-[#E5E7EB] bg-white shadow-sm">
+            <CardContent className="p-6 text-sm text-[#6B7280]">Loading incidents...</CardContent>
+          </Card>
+        ) : (
+          <>
+            <Card className="overflow-hidden border border-[#E5E7EB] bg-white shadow-sm">
+              <CardContent className="relative p-0">
+                {tableLoading && (
+                  <>
+                    <div className="absolute left-0 right-0 top-0 z-10 h-1 overflow-hidden bg-slate-100">
+                      <div className="h-full w-1/3 animate-pulse rounded-full bg-blue-500" />
+                    </div>
+                    <div className="pointer-events-none absolute inset-0 z-10 bg-white/40" />
+                  </>
                 )}
-              </TableBody>
-            </Table>
+
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-[#F8FAFC]">
+                      <TableHead className="text-[11px]">Created</TableHead>
+                      <TableHead className="text-[11px]">Log ID</TableHead>
+                      <TableHead className="text-[11px]">Status</TableHead>
+                      <TableHead className="text-[11px]">Reviewer</TableHead>
+                      <TableHead className="text-[11px]">Proposed</TableHead>
+                      <TableHead className="text-[11px]">Generated Policy</TableHead>
+                      <TableHead className="text-[11px]">Actions</TableHead>
+                    </TableRow>
+                  </TableHeader>
+
+                  <TableBody>
+                    {!tableLoading && items.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={7} className="py-8 text-center text-sm text-[#6B7280]">
+                          No incidents with status {activeTab.replace("_", " ")}
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      items.map((rev) => {
+                        const incidentDetailHref = `/incidents/${rev.review_id}?returnTo=${encodeURIComponent(currentListHref)}`
+                        const logDetailHref = `/logs/${rev.log_id}?returnTo=${encodeURIComponent(currentListHref)}`
+
+                        return (
+                          <TableRow
+                            key={rev.review_id}
+                            className={cn("text-xs transition-colors duration-150", getIncidentRowClass(rev))}
+                          >
+                            <TableCell className="font-mono text-[11px] text-[#6B7280]">{fmt(rev.created_at)}</TableCell>
+
+                            <TableCell>
+                              <Link href={logDetailHref} className="font-mono text-primary hover:underline">
+                                {rev.log_id}
+                              </Link>
+                            </TableCell>
+
+                            <TableCell>
+                              <StatusChip value={rev.status} type="review" size="sm" />
+                            </TableCell>
+
+                            <TableCell className="text-[11px] text-[#6B7280]">{rev.reviewer_id ?? "—"}</TableCell>
+
+                            <TableCell>
+                              {rev.proposed_action ? (
+                                <span
+                                  className={cn(
+                                    "inline-flex items-center rounded-md border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
+                                    getActionBadgeClass(rev.proposed_action)
+                                  )}
+                                >
+                                  {rev.proposed_action.replace(/_/g, " ")}
+                                </span>
+                              ) : (
+                                <span className="text-[11px] text-[#6B7280]">—</span>
+                              )}
+                            </TableCell>
+
+                            <TableCell className="text-[11px]">
+                              {rev.generated_policy_id ? (
+                                <Link
+                                  href={`/policies/${rev.generated_policy_id}`}
+                                  className="font-mono text-primary hover:underline"
+                                >
+                                  {rev.generated_policy_id}
+                                </Link>
+                              ) : (
+                                "—"
+                              )}
+                            </TableCell>
+
+                            <TableCell>
+                              <Link href={incidentDetailHref}>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-7 px-2 text-xs text-[#1E3A8A] transition-colors hover:bg-slate-100 hover:text-[#2563EB]"
+                                >
+                                  Detail
+                                </Button>
+                              </Link>
+                            </TableCell>
+                          </TableRow>
+                        )
+                      })
+                    )}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
 
             <div className="flex items-center justify-between border-t bg-white px-4 py-3">
               <div className="text-xs text-[#6B7280]">
-                {total === 0
-                  ? "No results"
-                  : `Showing ${pageStart}-${pageEnd} of ${total.toLocaleString()}`}
+                {total === 0 ? "No results" : `Showing ${pageStart}-${pageEnd} of ${total.toLocaleString()}`}
               </div>
 
               <div className="flex items-center gap-2">
                 <Button
                   variant="outline"
                   size="sm"
-                  disabled={page <= 1 || loading}
+                  disabled={page <= 1 || tableLoading}
                   onClick={() => setPage((prev) => Math.max(1, prev - 1))}
                 >
                   Previous
@@ -424,16 +612,17 @@ export default function IncidentsPage() {
                 <Button
                   variant="outline"
                   size="sm"
-                  disabled={page >= totalPages || loading}
+                  disabled={page >= totalPages || tableLoading}
                   onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}
                 >
                   Next
                 </Button>
               </div>
             </div>
-          </CardContent>
-        </Card>
+          </>
+        )}
       </Tabs>
     </div>
   )
 }
+

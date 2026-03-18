@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react"
 import Link from "next/link"
-import { useParams, useRouter } from "next/navigation"
+import { useParams, useRouter, useSearchParams } from "next/navigation"
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -46,10 +46,25 @@ function getAiScoreSafe(log: unknown): string {
   return "N/A"
 }
 
+function normalizeReturnTo(value: string | null, fallback: string): string {
+  if (!value) return fallback
+
+  try {
+    const decoded = decodeURIComponent(value)
+    if (decoded.startsWith("/incidents")) return decoded
+  } catch {
+    if (value.startsWith("/incidents")) return value
+  }
+
+  return fallback
+}
+
 export default function IncidentDetailPage() {
   const params = useParams<{ id: string }>()
   const router = useRouter()
+  const searchParams = useSearchParams()
   const reviewId = Number(params?.id)
+  const backHref = normalizeReturnTo(searchParams.get("returnTo"), "/incidents")
 
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
@@ -197,7 +212,7 @@ export default function IncidentDetailPage() {
       <div className="flex flex-col items-center justify-center gap-4 py-20">
         <p className="text-muted-foreground">{err ?? "Incident not found"}</p>
         <div className="flex gap-2">
-          <Link href="/incidents">
+          <Link href={backHref}>
             <Button variant="outline" size="sm">
               Back to Incidents
             </Button>
@@ -219,7 +234,7 @@ export default function IncidentDetailPage() {
           </BreadcrumbItem>
           <BreadcrumbSeparator />
           <BreadcrumbItem>
-            <BreadcrumbLink href="/incidents">Incidents</BreadcrumbLink>
+            <BreadcrumbLink href={backHref}>Incidents</BreadcrumbLink>
           </BreadcrumbItem>
           <BreadcrumbSeparator />
           <BreadcrumbItem>
@@ -230,7 +245,7 @@ export default function IncidentDetailPage() {
 
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex items-center gap-3">
-          <Link href="/incidents">
+          <Link href={backHref}>
             <Button variant="ghost" size="sm" className="h-8 px-2">
               <ArrowLeft className="size-4" />
             </Button>
@@ -258,52 +273,36 @@ export default function IncidentDetailPage() {
         <div className="flex flex-col gap-4 lg:col-span-2">
           <Card className="border shadow-sm">
             <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-semibold text-foreground">
-                Incident Summary
-              </CardTitle>
+              <CardTitle className="text-sm font-semibold text-foreground">Incident Summary</CardTitle>
             </CardHeader>
 
             <CardContent>
               <dl className="grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-2 xl:grid-cols-3">
                 <div className="min-w-0">
-                  <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                    Created
-                  </dt>
+                  <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Created</dt>
                   <dd className="mt-0.5 text-xs text-foreground">{fmt(review.created_at)}</dd>
                 </div>
 
                 <div className="min-w-0">
-                  <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                    Reviewed At
-                  </dt>
+                  <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Reviewed At</dt>
                   <dd className="mt-0.5 text-xs text-foreground">{fmt(review.reviewed_at)}</dd>
                 </div>
 
                 <div className="min-w-0">
-                  <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                    Proposed Action
-                  </dt>
-                  <dd className="mt-0.5 text-xs font-medium text-foreground">
-                    {review.proposed_action ?? "N/A"}
-                  </dd>
+                  <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Proposed Action</dt>
+                  <dd className="mt-0.5 text-xs font-medium text-foreground">{review.proposed_action ?? "N/A"}</dd>
                 </div>
 
                 <div className="min-w-0">
-                  <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                    Reviewer
-                  </dt>
-                  <dd className="mt-0.5 text-xs text-foreground">
-                    {review.reviewer_id ?? "Unassigned"}
-                  </dd>
+                  <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Reviewer</dt>
+                  <dd className="mt-0.5 text-xs text-foreground">{review.reviewer_id ?? "Unassigned"}</dd>
                 </div>
 
                 <div className="min-w-0">
-                  <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                    Log ID
-                  </dt>
+                  <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Log ID</dt>
                   <dd className="mt-0.5">
                     <Link
-                      href={`/logs/${review.log_id}`}
+                      href={`/logs/${review.log_id}?returnTo=${encodeURIComponent(backHref)}`}
                       className="inline-flex items-center gap-1 text-xs font-mono text-primary hover:underline"
                     >
                       {review.log_id}
@@ -314,9 +313,7 @@ export default function IncidentDetailPage() {
 
                 {review.generated_policy_id ? (
                   <div className="min-w-0">
-                    <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                      Generated Policy
-                    </dt>
+                    <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Generated Policy</dt>
                     <dd className="mt-0.5">
                       <Link
                         href={`/policies/${review.generated_policy_id}`}
@@ -332,12 +329,8 @@ export default function IncidentDetailPage() {
 
               {review.note ? (
                 <div className="mt-4 rounded-md bg-muted p-3">
-                  <p className="mb-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                    Note
-                  </p>
-                  <p className="whitespace-pre-wrap break-words text-xs text-foreground">
-                    {review.note}
-                  </p>
+                  <p className="mb-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Note</p>
+                  <p className="whitespace-pre-wrap break-words text-xs text-foreground">{review.note}</p>
                 </div>
               ) : null}
             </CardContent>
@@ -345,90 +338,47 @@ export default function IncidentDetailPage() {
 
           <Card className="border shadow-sm">
             <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-semibold text-foreground">
-                Linked Log Summary
-              </CardTitle>
+              <CardTitle className="text-sm font-semibold text-foreground">Linked Log Summary</CardTitle>
             </CardHeader>
 
             <CardContent>
               {log ? (
                 <dl className="grid grid-cols-1 gap-x-6 gap-y-3 text-sm md:grid-cols-2">
                   <div className="min-w-0">
-                    <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                      Host
-                    </dt>
-                    <dd
-                      className="mt-0.5 truncate text-xs font-mono text-foreground"
-                      title={log.host ?? "N/A"}
-                    >
+                    <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Host</dt>
+                    <dd className="mt-0.5 truncate text-xs font-mono text-foreground" title={log.host ?? "N/A"}>
                       {log.host ?? "N/A"}
                     </dd>
                   </div>
 
                   <div className="min-w-0">
-                    <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                      Decision
-                    </dt>
+                    <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Decision</dt>
                     <dd className="mt-0.5">
                       <StatusChip value={log.decision} />
                     </dd>
                   </div>
 
                   <div className="min-w-0 md:col-span-2">
-                    <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                      Path
-                    </dt>
-                    <dd
-                      className="mt-0.5 truncate text-xs font-mono text-foreground"
-                      title={log.path ?? "N/A"}
-                    >
+                    <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Path</dt>
+                    <dd className="mt-0.5 truncate text-xs font-mono text-foreground" title={log.path ?? "N/A"}>
                       {log.path ?? "N/A"}
                     </dd>
                   </div>
 
                   <div className="min-w-0">
-                    <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                      Stage
-                    </dt>
+                    <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Stage</dt>
                     <dd className="mt-0.5">
                       <StatusChip value={log.decision_stage} type="stage" />
                     </dd>
                   </div>
 
                   <div className="min-w-0">
-                    <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                      Client IP
-                    </dt>
-                    <dd
-                      className="mt-0.5 truncate text-xs font-mono text-foreground"
-                      title={log.client_ip ?? "N/A"}
-                    >
-                      {log.client_ip ?? "N/A"}
-                    </dd>
-                  </div>
-
-                  <div className="min-w-0">
-                    <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                      Method
-                    </dt>
-                    <dd className="mt-0.5 text-xs font-mono text-foreground">
-                      {log.method ?? "N/A"}
-                    </dd>
-                  </div>
-
-                  <div className="min-w-0">
-                    <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                      AI Score
-                    </dt>
-                    <dd className="mt-0.5 text-xs font-mono text-foreground">
-                      {aiScore}
-                    </dd>
+                    <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">AI Score</dt>
+                    <dd className="mt-0.5 text-xs font-mono text-foreground">{aiScore}</dd>
                   </div>
                 </dl>
               ) : (
-                <p className="text-xs text-muted-foreground">
-                  No linked log payload from backend
-                </p>
+                <p className="text-sm text-muted-foreground">Linked log data is unavailable.</p>
               )}
             </CardContent>
           </Card>
@@ -437,79 +387,17 @@ export default function IncidentDetailPage() {
         <div className="flex flex-col gap-4">
           <Card className="border shadow-sm">
             <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-semibold text-foreground">
-                Add Note
-              </CardTitle>
+              <CardTitle className="text-sm font-semibold text-foreground">Analyst Note</CardTitle>
             </CardHeader>
-
-            <CardContent className="flex flex-col gap-2">
+            <CardContent className="space-y-3">
               <Textarea
-                placeholder="Add investigation notes..."
                 value={note}
-                onChange={e => setNote(e.target.value)}
-                className="min-h-[100px] resize-none text-xs"
+                onChange={(e) => setNote(e.target.value)}
+                placeholder="Add analyst note..."
+                className="min-h-[140px] text-sm"
               />
-
-              <Button
-                size="sm"
-                className="h-8 text-xs"
-                disabled={savingNote || !note.trim()}
-                onClick={saveNote}
-              >
+              <Button size="sm" className="h-8 text-xs" onClick={saveNote} disabled={savingNote}>
                 {savingNote ? "Saving..." : "Save Note"}
-              </Button>
-            </CardContent>
-          </Card>
-
-          <Card className="border shadow-sm">
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-semibold text-foreground">
-                Quick Actions
-              </CardTitle>
-            </CardHeader>
-
-            <CardContent className="flex flex-col gap-2">
-              <Link href={`/logs/${review.log_id}`}>
-                <Button variant="outline" size="sm" className="h-8 w-full justify-between text-xs">
-                  View Raw Log
-                  <ExternalLink className="size-3" />
-                </Button>
-              </Link>
-
-              {generatedPolicyId ? (
-                <Link href={`/policies/${generatedPolicyId}`}>
-                  <Button size="sm" className="h-8 w-full justify-between text-xs">
-                    Open Linked Policy
-                    <ExternalLink className="size-3" />
-                  </Button>
-                </Link>
-              ) : (
-                <Button size="sm" variant="outline" className="h-8 w-full justify-between text-xs" disabled>
-                  Policy Not Generated
-                  <ExternalLink className="size-3" />
-                </Button>
-              )}
-
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-8 w-full justify-between text-xs"
-                onClick={() => patchStatus("IN_PROGRESS")}
-                disabled={!canSetInProgress || savingStatus}
-              >
-                {savingStatus && canSetInProgress ? "Updating..." : "Mark In Progress"}
-                <ExternalLink className="size-3 opacity-0" />
-              </Button>
-
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-8 w-full justify-between text-xs"
-                onClick={() => patchStatus("CLOSED")}
-                disabled={!canClose || savingStatus}
-              >
-                {savingStatus && canClose ? "Updating..." : "Close Incident"}
-                <ExternalLink className="size-3 opacity-0" />
               </Button>
             </CardContent>
           </Card>

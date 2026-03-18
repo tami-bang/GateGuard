@@ -1,7 +1,7 @@
 "use client"
 
-import { Suspense, useEffect, useMemo, useState } from "react"
-import { useSearchParams } from "next/navigation"
+import { Suspense, useEffect, useMemo, useRef, useState } from "react"
+import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import Link from "next/link"
 
 import { Card, CardContent } from "@/components/ui/card"
@@ -26,14 +26,8 @@ import { Search, X, MessageSquare, Filter, ShieldAlert, Bot, FileText, AlertTria
 
 import { apiListLogs, type AccessLogItem, type ListLogsResponse } from "@/lib/api-client"
 
-/*
-페이지당 로그 개수
-*/
 const PAGE_SIZE = 15
 
-/*
-필터 상태 타입
-*/
 type FiltersState = {
   decision: string
   stage: string
@@ -48,9 +42,6 @@ type FiltersState = {
   injectStatusCode: string
 }
 
-/*
-초기 필터 값
-*/
 const INITIAL_FILTERS: FiltersState = {
   decision: "all",
   stage: "all",
@@ -67,10 +58,70 @@ const INITIAL_FILTERS: FiltersState = {
 
 const ALLOWED_DECISIONS = new Set(["ALLOW", "BLOCK", "REVIEW", "ERROR"])
 const ALLOWED_STAGES = new Set(["POLICY_STAGE", "AI_STAGE", "FAIL_STAGE"])
+const CACHE_TTL_MS = 45_000
 
-/*
-Quick Filter 정의
-*/
+type SessionCacheEnvelope<T> = {
+  savedAt: number
+  data: T
+}
+
+type LogsCachePayload = {
+  response: ListLogsResponse
+  requestKey: string
+}
+
+function readSessionCache<T>(key: string): T | null {
+  if (typeof window === "undefined") return null
+
+  const raw = window.sessionStorage.getItem(key)
+  if (!raw) return null
+
+  try {
+    const parsed = JSON.parse(raw) as SessionCacheEnvelope<T>
+    if (!parsed || typeof parsed !== "object") {
+      window.sessionStorage.removeItem(key)
+      return null
+    }
+
+    if (typeof parsed.savedAt !== "number" || Date.now() - parsed.savedAt > CACHE_TTL_MS) {
+      window.sessionStorage.removeItem(key)
+      return null
+    }
+
+    return parsed.data ?? null
+  } catch {
+    window.sessionStorage.removeItem(key)
+    return null
+  }
+}
+
+function writeSessionCache<T>(key: string, data: T) {
+  if (typeof window === "undefined") return
+
+  const payload: SessionCacheEnvelope<T> = {
+    savedAt: Date.now(),
+    data,
+  }
+
+  window.sessionStorage.setItem(key, JSON.stringify(payload))
+}
+
+function isSameFilters(a: FiltersState, b: FiltersState): boolean {
+  return (
+    a.decision === b.decision &&
+    a.stage === b.stage &&
+    a.host === b.host &&
+    a.clientIp === b.clientIp &&
+    a.startTime === b.startTime &&
+    a.endTime === b.endTime &&
+    a.minScore === b.minScore &&
+    a.maxScore === b.maxScore &&
+    a.injectAttempted === b.injectAttempted &&
+    a.injectSend === b.injectSend &&
+    a.injectStatusCode === b.injectStatusCode
+  )
+}
+
 type QuickFilterItem = {
   key: string
   label: string
@@ -78,9 +129,6 @@ type QuickFilterItem = {
   onClick: () => void
 }
 
-/*
-엔트리
-*/
 export default function LogsPage() {
   return (
     <Suspense fallback={<LogsPageSkeleton />}>
@@ -89,9 +137,6 @@ export default function LogsPage() {
   )
 }
 
-/*
-Suspense fallback
-*/
 function LogsPageSkeleton() {
   return (
     <div className="flex flex-col gap-4">
@@ -113,17 +158,12 @@ function LogsPageSkeleton() {
       </div>
 
       <Card className="border shadow-sm">
-        <CardContent className="p-6 text-sm text-muted-foreground">
-          Fetching logs from FastAPI...
-        </CardContent>
+        <CardContent className="p-6 text-sm text-muted-foreground">Fetching logs from FastAPI...</CardContent>
       </Card>
     </div>
   )
 }
 
-/*
-입력 디바운스
-*/
 function useDebounced<T>(value: T, delayMs: number): T {
   const [v, setV] = useState(value)
 
@@ -135,17 +175,11 @@ function useDebounced<T>(value: T, delayMs: number): T {
   return v
 }
 
-/*
-datetime-local → API datetime
-*/
 function toApiDateTime(value: string): string | undefined {
   if (!value) return undefined
   return `${value.replace("T", " ")}:00`
 }
 
-/*
-문자열 숫자 → number
-*/
 function toNumberOrUndefined(value: string): number | undefined {
   const s = value.trim()
   if (!s) return undefined
@@ -169,10 +203,12 @@ function normalizeHostParam(value: string | null): string {
   return value?.trim() ?? ""
 }
 
-/*
-행 강조 클래스
-- BLOCK / REVIEW / FAIL_STAGE 우선 강조
-*/
+function normalizeNumberParam(value: string | null, fallback: number): number {
+  if (!value) return fallback
+  const n = Number(value)
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback
+}
+
 function getRowClass(it: AccessLogItem): string {
   const decision = String(it.decision || "").toUpperCase()
   const stage = String(it.decision_stage || "").toUpperCase()
@@ -192,9 +228,6 @@ function getRowClass(it: AccessLogItem): string {
   return "hover:bg-slate-50"
 }
 
-/*
-시간대 quick filter
-*/
 function getRangePreset(hours: number): { startTime: string; endTime: string } {
   const now = new Date()
   const start = new Date(now.getTime() - hours * 60 * 60 * 1000)
@@ -214,7 +247,35 @@ function getRangePreset(hours: number): { startTime: string; endTime: string } {
   }
 }
 
+function buildLogsQuery(params: {
+  filters: FiltersState
+  page: number
+  sortField: string
+  sortDir: "asc" | "desc"
+}): string {
+  const qs = new URLSearchParams()
+
+  if (params.filters.decision !== "all") qs.set("decision", params.filters.decision)
+  if (params.filters.stage !== "all") qs.set("stage", params.filters.stage)
+  if (params.filters.host.trim()) qs.set("host", params.filters.host.trim())
+  if (params.filters.clientIp.trim()) qs.set("client_ip", params.filters.clientIp.trim())
+  if (params.filters.startTime) qs.set("start_time", params.filters.startTime)
+  if (params.filters.endTime) qs.set("end_time", params.filters.endTime)
+  if (params.filters.minScore.trim()) qs.set("min_score", params.filters.minScore.trim())
+  if (params.filters.maxScore.trim()) qs.set("max_score", params.filters.maxScore.trim())
+  if (params.filters.injectAttempted !== "all") qs.set("inject_attempted", params.filters.injectAttempted)
+  if (params.filters.injectSend !== "all") qs.set("inject_send", params.filters.injectSend)
+  if (params.filters.injectStatusCode.trim()) qs.set("inject_status_code", params.filters.injectStatusCode.trim())
+  if (params.page > 1) qs.set("page", String(params.page))
+  if (params.sortField !== "detect_timestamp") qs.set("sort", params.sortField)
+  if (params.sortDir !== "desc") qs.set("dir", params.sortDir)
+
+  return qs.toString()
+}
+
 function LogsPageInner() {
+  const router = useRouter()
+  const pathname = usePathname()
   const searchParams = useSearchParams()
   const fromSlack = searchParams.get("from") === "slack"
 
@@ -222,35 +283,62 @@ function LogsPageInner() {
   const [page, setPage] = useState(1)
   const [sortField, setSortField] = useState<string>("detect_timestamp")
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc")
-  const [loading, setLoading] = useState(false)
+
+  const [initialLoading, setInitialLoading] = useState(true)
+  const [tableLoading, setTableLoading] = useState(false)
   const [error, setError] = useState<string>("")
   const [data, setData] = useState<ListLogsResponse | null>(null)
 
-  /*
-  URL query → filters 반영
-  */
+  const didHydrateFromUrl = useRef(false)
+  const didInitialLoad = useRef(false)
+  const restoredFromCacheRef = useRef(false)
+  const restoredRequestKeyRef = useRef("")
+  const lastUrlSnapshotRef = useRef("")
+
   useEffect(() => {
-    const nextDecision = normalizeDecisionParam(searchParams.get("decision"))
-    const nextStage = normalizeStageParam(searchParams.get("stage"))
-    const nextHost = normalizeHostParam(searchParams.get("host"))
+    const nextFilters: FiltersState = {
+      decision: normalizeDecisionParam(searchParams.get("decision")),
+      stage: normalizeStageParam(searchParams.get("stage")),
+      host: normalizeHostParam(searchParams.get("host")),
+      clientIp: searchParams.get("client_ip")?.trim() ?? "",
+      startTime: searchParams.get("start_time") ?? "",
+      endTime: searchParams.get("end_time") ?? "",
+      minScore: searchParams.get("min_score") ?? "",
+      maxScore: searchParams.get("max_score") ?? "",
+      injectAttempted:
+        searchParams.get("inject_attempted") === "0" || searchParams.get("inject_attempted") === "1"
+          ? (searchParams.get("inject_attempted") as string)
+          : "all",
+      injectSend:
+        searchParams.get("inject_send") === "0" || searchParams.get("inject_send") === "1"
+          ? (searchParams.get("inject_send") as string)
+          : "all",
+      injectStatusCode: searchParams.get("inject_status_code") ?? "",
+    }
 
-    setFilters((prev) => {
-      const next: FiltersState = {
-        ...prev,
-        decision: nextDecision,
-        stage: nextStage,
-        host: nextHost,
-      }
+    const nextPage = normalizeNumberParam(searchParams.get("page"), 1)
+    const nextSort = searchParams.get("sort") || "detect_timestamp"
+    const nextDir = searchParams.get("dir") === "asc" ? "asc" : "desc"
 
-      const changed =
-        prev.decision !== next.decision ||
-        prev.stage !== next.stage ||
-        prev.host !== next.host
-
-      return changed ? next : prev
+    const snapshot = JSON.stringify({
+      filters: nextFilters,
+      page: nextPage,
+      sortField: nextSort,
+      sortDir: nextDir,
     })
 
-    setPage(1)
+    if (lastUrlSnapshotRef.current === snapshot) {
+      didHydrateFromUrl.current = true
+      return
+    }
+
+    lastUrlSnapshotRef.current = snapshot
+
+    setFilters((prev) => (isSameFilters(prev, nextFilters) ? prev : nextFilters))
+    setPage((prev) => (prev === nextPage ? prev : nextPage))
+    setSortField((prev) => (prev === nextSort ? prev : nextSort))
+    setSortDir((prev) => (prev === nextDir ? prev : nextDir))
+    didHydrateFromUrl.current = true
   }, [searchParams])
 
   const offset = (page - 1) * PAGE_SIZE
@@ -263,29 +351,73 @@ function LogsPageInner() {
   const maxScoreDebounced = useDebounced(filters.maxScore.trim(), 300)
   const injectStatusCodeDebounced = useDebounced(filters.injectStatusCode.trim(), 300)
 
-  /*
-  API 파라미터 생성
-  */
+  const listQueryString = useMemo(() => {
+    return buildLogsQuery({
+      filters,
+      page,
+      sortField,
+      sortDir,
+    })
+  }, [filters, page, sortField, sortDir])
+
+  const currentListHref = useMemo(() => {
+    return listQueryString ? `${pathname}?${listQueryString}` : pathname
+  }, [pathname, listQueryString])
+
+  const cacheKey = useMemo(() => `gateguard:logs:${currentListHref}`, [currentListHref])
+
+  useEffect(() => {
+    if (!didHydrateFromUrl.current) return
+    if (restoredFromCacheRef.current) return
+
+    const current = searchParams.toString()
+    if (current === listQueryString) return
+
+    router.replace(listQueryString ? `${pathname}?${listQueryString}` : pathname, { scroll: false })
+  }, [listQueryString, pathname, router, searchParams])
+
+  useEffect(() => {
+    const cached = readSessionCache<LogsCachePayload>(cacheKey)
+
+    if (!cached?.response) {
+      restoredFromCacheRef.current = false
+      restoredRequestKeyRef.current = ""
+      return
+    }
+
+    setData(cached.response)
+    setInitialLoading(false)
+    setTableLoading(false)
+    setError("")
+    didInitialLoad.current = true
+    restoredFromCacheRef.current = true
+    restoredRequestKeyRef.current = cached.requestKey || ""
+  }, [cacheKey])
+
+  const debounceSettled =
+    hostDebounced === filters.host.trim() &&
+    clientIpDebounced === filters.clientIp.trim() &&
+    startTimeDebounced === filters.startTime &&
+    endTimeDebounced === filters.endTime &&
+    minScoreDebounced === filters.minScore.trim() &&
+    maxScoreDebounced === filters.maxScore.trim() &&
+    injectStatusCodeDebounced === filters.injectStatusCode.trim()
+
   const apiParams = useMemo(() => {
     return {
       limit: PAGE_SIZE,
       offset,
-
       decision: filters.decision !== "all" ? filters.decision : undefined,
       stage: filters.stage !== "all" ? filters.stage : undefined,
       host: hostDebounced || undefined,
       client_ip: clientIpDebounced || undefined,
-
       start_time: toApiDateTime(startTimeDebounced),
       end_time: toApiDateTime(endTimeDebounced),
-
       min_score: toNumberOrUndefined(minScoreDebounced),
       max_score: toNumberOrUndefined(maxScoreDebounced),
-
       inject_attempted: filters.injectAttempted !== "all" ? Number(filters.injectAttempted) : undefined,
       inject_send: filters.injectSend !== "all" ? Number(filters.injectSend) : undefined,
       inject_status_code: toNumberOrUndefined(injectStatusCodeDebounced),
-
       sort: sortField || "detect_timestamp",
       dir: sortDir || "desc",
     }
@@ -306,29 +438,48 @@ function LogsPageInner() {
     sortDir,
   ])
 
-  /*
-  로그 조회
-  */
+  const requestKey = useMemo(() => JSON.stringify(apiParams), [apiParams])
+
   useEffect(() => {
     let cancelled = false
 
     async function run() {
-      setLoading(true)
+      if (!debounceSettled) {
+        return
+      }
+
+      if (restoredRequestKeyRef.current && restoredRequestKeyRef.current === requestKey) {
+        restoredFromCacheRef.current = false
+        return
+      }
+
+      if (restoredFromCacheRef.current) {
+        restoredFromCacheRef.current = false
+      }
+
+      if (didInitialLoad.current) {
+        setTableLoading(true)
+      } else {
+        setInitialLoading(true)
+      }
+
       setError("")
 
       try {
         const res = await apiListLogs(apiParams)
-        if (!cancelled) {
-          setData(res)
-        }
+        if (cancelled) return
+
+        setData(res)
+        didInitialLoad.current = true
+        writeSessionCache<LogsCachePayload>(cacheKey, { response: res, requestKey })
+      restoredRequestKeyRef.current = requestKey
       } catch (e: any) {
-        if (!cancelled) {
-          setError(e?.message || "Failed to load logs")
-        }
+        if (cancelled) return
+        setError(e?.message || "Failed to load logs")
       } finally {
-        if (!cancelled) {
-          setLoading(false)
-        }
+        if (cancelled) return
+        setInitialLoading(false)
+        setTableLoading(false)
       }
     }
 
@@ -337,7 +488,7 @@ function LogsPageInner() {
     return () => {
       cancelled = true
     }
-  }, [apiParams])
+  }, [apiParams, cacheKey, debounceSettled, requestKey])
 
   const items: AccessLogItem[] = data?.items || []
   const total = data?.total ?? 0
@@ -370,9 +521,6 @@ function LogsPageInner() {
     setPage(1)
   }
 
-  /*
-  Quick Filter 적용
-  */
   function applyQuickFilterBlockOnly() {
     setFilters((prev) => ({
       ...prev,
@@ -481,9 +629,6 @@ function LogsPageInner() {
     (filters.injectSend !== "all" ? 1 : 0) +
     (filters.injectStatusCode.trim() ? 1 : 0)
 
-  /*
-  Active Filter Pills
-  */
   const activeFilterPills = useMemo(() => {
     const pills: Array<{ key: string; label: string; onRemove: () => void }> = []
 
@@ -580,7 +725,6 @@ function LogsPageInner() {
 
   return (
     <div className="flex flex-col gap-4">
-      {/* breadcrumb */}
       <Breadcrumb>
         <BreadcrumbList>
           <BreadcrumbItem>
@@ -593,12 +737,11 @@ function LogsPageInner() {
         </BreadcrumbList>
       </Breadcrumb>
 
-      {/* 페이지 헤더 */}
       <div className="flex items-start justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold text-[#111827]">Access Logs</h1>
           <p className="text-sm text-[#6B7280]">
-            {loading ? "Loading..." : `${total} log entries`}
+            {initialLoading ? "Loading..." : `${total} log entries`}
             {error ? <span className="ml-2 text-destructive">({error})</span> : null}
           </p>
         </div>
@@ -622,7 +765,6 @@ function LogsPageInner() {
         </div>
       </div>
 
-      {/* Slack 유입 안내 */}
       {fromSlack && (
         <div className="flex items-center gap-2 rounded-md border border-blue-200 bg-blue-50 px-4 py-2.5 text-sm text-blue-800">
           <MessageSquare className="size-4" />
@@ -630,7 +772,6 @@ function LogsPageInner() {
         </div>
       )}
 
-      {/* Quick Filters */}
       <Card className="border border-[#E5E7EB] bg-white shadow-sm">
         <CardContent className="flex flex-wrap items-center gap-2 p-3">
           <div className="mr-1 flex items-center gap-2 text-xs font-medium text-[#6B7280]">
@@ -653,14 +794,10 @@ function LogsPageInner() {
         </CardContent>
       </Card>
 
-      {/* 필터 영역 */}
       <Card className="border border-[#E5E7EB] bg-white shadow-sm">
         <CardContent className="flex flex-wrap items-end gap-3 p-3">
-          {/* Decision */}
           <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">
-              Decision
-            </label>
+            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Decision</label>
             <Select value={filters.decision} onValueChange={(v) => updateFilter("decision", v)}>
               <SelectTrigger className="h-8 w-[130px] text-xs">
                 <SelectValue />
@@ -675,11 +812,8 @@ function LogsPageInner() {
             </Select>
           </div>
 
-          {/* Stage */}
           <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">
-              Stage
-            </label>
+            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Stage</label>
             <Select value={filters.stage} onValueChange={(v) => updateFilter("stage", v)}>
               <SelectTrigger className="h-8 w-[150px] text-xs">
                 <SelectValue />
@@ -693,11 +827,8 @@ function LogsPageInner() {
             </Select>
           </div>
 
-          {/* Host */}
           <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">
-              Host
-            </label>
+            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Host</label>
             <div className="relative">
               <Search className="absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
               <Input
@@ -709,11 +840,8 @@ function LogsPageInner() {
             </div>
           </div>
 
-          {/* Client IP */}
           <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">
-              Client IP
-            </label>
+            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Client IP</label>
             <div className="relative">
               <Search className="absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
               <Input
@@ -725,11 +853,8 @@ function LogsPageInner() {
             </div>
           </div>
 
-          {/* Start Time */}
           <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">
-              Start Time
-            </label>
+            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Start Time</label>
             <Input
               type="datetime-local"
               value={filters.startTime}
@@ -738,11 +863,8 @@ function LogsPageInner() {
             />
           </div>
 
-          {/* End Time */}
           <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">
-              End Time
-            </label>
+            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">End Time</label>
             <Input
               type="datetime-local"
               value={filters.endTime}
@@ -751,11 +873,8 @@ function LogsPageInner() {
             />
           </div>
 
-          {/* Min Score */}
           <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">
-              Min Score
-            </label>
+            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Min Score</label>
             <Input
               type="number"
               min="0"
@@ -768,11 +887,8 @@ function LogsPageInner() {
             />
           </div>
 
-          {/* Max Score */}
           <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">
-              Max Score
-            </label>
+            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Max Score</label>
             <Input
               type="number"
               min="0"
@@ -785,11 +901,8 @@ function LogsPageInner() {
             />
           </div>
 
-          {/* Inject Attempted */}
           <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">
-              Inject Attempted
-            </label>
+            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Inject Attempted</label>
             <Select value={filters.injectAttempted} onValueChange={(v) => updateFilter("injectAttempted", v)}>
               <SelectTrigger className="h-8 w-[140px] text-xs">
                 <SelectValue />
@@ -802,11 +915,8 @@ function LogsPageInner() {
             </Select>
           </div>
 
-          {/* Inject Send */}
           <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">
-              Inject Send
-            </label>
+            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Inject Send</label>
             <Select value={filters.injectSend} onValueChange={(v) => updateFilter("injectSend", v)}>
               <SelectTrigger className="h-8 w-[120px] text-xs">
                 <SelectValue />
@@ -819,11 +929,8 @@ function LogsPageInner() {
             </Select>
           </div>
 
-          {/* Inject Code */}
           <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">
-              Inject Code
-            </label>
+            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Inject Code</label>
             <Input
               type="number"
               placeholder="403"
@@ -841,7 +948,6 @@ function LogsPageInner() {
         </CardContent>
       </Card>
 
-      {/* Active Filters */}
       {activeFilterPills.length > 0 ? (
         <div className="flex flex-wrap items-center gap-2">
           <div className="text-xs font-medium text-[#6B7280]">Active Filters</div>
@@ -866,156 +972,169 @@ function LogsPageInner() {
         </div>
       ) : null}
 
-      {/* 로그 테이블 */}
-      <Card className="overflow-hidden border border-[#E5E7EB] bg-white shadow-sm">
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow className="bg-[#F8FAFC]">
-                <TableHead className="w-[90px] text-[11px]">
-                  <button className="hover:underline" onClick={() => handleSort("log_id")}>
-                    ID<SortIndicator field="log_id" />
-                  </button>
-                </TableHead>
+      {initialLoading ? (
+        <Card className="border border-[#E5E7EB] bg-white shadow-sm">
+          <CardContent className="p-6 text-sm text-[#6B7280]">Loading logs...</CardContent>
+        </Card>
+      ) : (
+        <>
+          <Card className="overflow-hidden border border-[#E5E7EB] bg-white shadow-sm">
+            <CardContent className="relative p-0">
+              {tableLoading && (
+                <>
+                  <div className="absolute left-0 right-0 top-0 z-10 h-1 overflow-hidden bg-slate-100">
+                    <div className="h-full w-1/3 animate-pulse rounded-full bg-blue-500" />
+                  </div>
+                  <div className="pointer-events-none absolute inset-0 z-10 bg-white/40" />
+                </>
+              )}
 
-                <TableHead className="text-[11px]">
-                  <button className="hover:underline" onClick={() => handleSort("detect_timestamp")}>
-                    Timestamp<SortIndicator field="detect_timestamp" />
-                  </button>
-                </TableHead>
+              <Table>
+                <TableHeader>
+                  <TableRow className="bg-[#F8FAFC]">
+                    <TableHead className="w-[90px] text-[11px]">
+                      <button className="hover:underline" onClick={() => handleSort("log_id")}>
+                        ID<SortIndicator field="log_id" />
+                      </button>
+                    </TableHead>
 
-                <TableHead className="text-[11px]">Client</TableHead>
-                <TableHead className="text-[11px]">Host / Path</TableHead>
+                    <TableHead className="text-[11px]">
+                      <button className="hover:underline" onClick={() => handleSort("detect_timestamp")}>
+                        Timestamp<SortIndicator field="detect_timestamp" />
+                      </button>
+                    </TableHead>
 
-                <TableHead className="w-[120px] text-[11px]">
-                  <button className="hover:underline" onClick={() => handleSort("decision")}>
-                    Decision<SortIndicator field="decision" />
-                  </button>
-                </TableHead>
+                    <TableHead className="text-[11px]">Client</TableHead>
+                    <TableHead className="text-[11px]">Host / Path</TableHead>
 
-                <TableHead className="w-[140px] text-[11px]">
-                  <button className="hover:underline" onClick={() => handleSort("decision_stage")}>
-                    Stage<SortIndicator field="decision_stage" />
-                  </button>
-                </TableHead>
+                    <TableHead className="w-[120px] text-[11px]">
+                      <button className="hover:underline" onClick={() => handleSort("decision")}>
+                        Decision<SortIndicator field="decision" />
+                      </button>
+                    </TableHead>
 
-                <TableHead className="w-[90px] text-[11px]">
-                  <button className="hover:underline" onClick={() => handleSort("ai_score")}>
-                    AI Score<SortIndicator field="ai_score" />
-                  </button>
-                </TableHead>
+                    <TableHead className="w-[140px] text-[11px]">
+                      <button className="hover:underline" onClick={() => handleSort("decision_stage")}>
+                        Stage<SortIndicator field="decision_stage" />
+                      </button>
+                    </TableHead>
 
-                <TableHead className="w-[110px] text-[11px]">
-                  <button className="hover:underline" onClick={() => handleSort("inject_status_code")}>
-                    Inject<SortIndicator field="inject_status_code" />
-                  </button>
-                </TableHead>
+                    <TableHead className="w-[90px] text-[11px]">
+                      <button className="hover:underline" onClick={() => handleSort("ai_score")}>
+                        AI Score<SortIndicator field="ai_score" />
+                      </button>
+                    </TableHead>
 
-                <TableHead className="text-[11px]">Reason</TableHead>
-              </TableRow>
-            </TableHeader>
+                    <TableHead className="w-[110px] text-[11px]">
+                      <button className="hover:underline" onClick={() => handleSort("inject_status_code")}>
+                        Inject<SortIndicator field="inject_status_code" />
+                      </button>
+                    </TableHead>
 
-            <TableBody>
-              {!loading && items.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={9} className="py-10 text-center text-sm text-[#6B7280]">
-                    No logs found.
-                  </TableCell>
-                </TableRow>
-              ) : null}
-
-              {items.map((it) => {
-                const client =
-                  it.client_ip && it.client_port
-                    ? `${it.client_ip}:${it.client_port}`
-                    : it.client_ip || "N/A"
-
-                const host = it.host || "N/A"
-                const path = it.path || "N/A"
-
-                return (
-                  <TableRow
-                    key={it.log_id}
-                    className={cn("text-xs transition-colors duration-150", getRowClass(it))}
-                  >
-                    <TableCell className="font-mono text-[11px]">
-                      <Link href={`/logs/${it.log_id}`} className="text-primary hover:underline">
-                        {it.log_id}
-                      </Link>
-                    </TableCell>
-
-                    <TableCell className="font-mono text-[11px] text-[#6B7280]">
-                      {it.detect_timestamp ? new Date(it.detect_timestamp).toLocaleString() : "N/A"}
-                    </TableCell>
-
-                    <TableCell className="font-mono text-[11px]">{client}</TableCell>
-
-                    <TableCell className="max-w-[420px]">
-                      <div className="truncate font-mono text-[11px] text-[#111827]">{host}</div>
-                      <div className="truncate font-mono text-[11px] text-[#6B7280]">{path}</div>
-                    </TableCell>
-
-                    <TableCell>
-                      <StatusChip value={String(it.decision || "ERROR")} size="sm" />
-                    </TableCell>
-
-                    <TableCell>
-                      <StatusChip value={String(it.decision_stage || "FAIL_STAGE")} type="stage" size="sm" />
-                    </TableCell>
-
-                    <TableCell className="font-mono text-[11px]">
-                      {typeof it.ai_score === "number" ? it.ai_score.toFixed(4) : "—"}
-                    </TableCell>
-
-                    <TableCell className="font-mono text-[11px]">
-                      {it.inject_attempted === 1
-                        ? `${it.inject_send === 1 ? "OK" : "FAIL"} / ${it.inject_status_code ?? "—"}`
-                        : "—"}
-                    </TableCell>
-
-                    <TableCell className="font-mono text-[11px] text-[#6B7280]">
-                      {it.reason || "—"}
-                    </TableCell>
+                    <TableHead className="text-[11px]">Reason</TableHead>
                   </TableRow>
-                )
-              })}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
+                </TableHeader>
 
-      {/* 페이지네이션 */}
-      <div className="flex items-center justify-between border rounded-md bg-white px-4 py-3">
-        <div className="text-xs text-[#6B7280]">
-          {total === 0
-            ? "No results"
-            : `Showing ${pageStart}-${pageEnd} of ${total.toLocaleString()}`}
-        </div>
+                <TableBody>
+                  {!tableLoading && items.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={9} className="py-10 text-center text-sm text-[#6B7280]">
+                        No logs found.
+                      </TableCell>
+                    </TableRow>
+                  ) : null}
 
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={page <= 1 || loading}
-            onClick={() => setPage((p) => Math.max(1, p - 1))}
-          >
-            Previous
-          </Button>
+                  {items.map((it) => {
+                    const client =
+                      it.client_ip && it.client_port ? `${it.client_ip}:${it.client_port}` : it.client_ip || "N/A"
 
-          <span className="min-w-[88px] text-center text-xs text-[#6B7280]">
-            Page {page} / {totalPages}
-          </span>
+                    const host = it.host || "N/A"
+                    const path = it.path || "N/A"
+                    const detailHref = `/logs/${it.log_id}?returnTo=${encodeURIComponent(currentListHref)}`
 
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={page >= totalPages || loading}
-            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-          >
-            Next
-          </Button>
-        </div>
-      </div>
+                    return (
+                      <TableRow
+                        key={it.log_id}
+                        className={cn("text-xs transition-colors duration-150", getRowClass(it))}
+                      >
+                        <TableCell className="font-mono text-[11px]">
+                          <Link href={detailHref} className="text-primary hover:underline">
+                            {it.log_id}
+                          </Link>
+                        </TableCell>
+
+                        <TableCell className="font-mono text-[11px] text-[#6B7280]">
+                          {it.detect_timestamp ? new Date(it.detect_timestamp).toLocaleString() : "N/A"}
+                        </TableCell>
+
+                        <TableCell className="font-mono text-[11px]">{client}</TableCell>
+
+                        <TableCell className="max-w-[420px]">
+                          <div className="truncate font-mono text-[11px] text-[#111827]">{host}</div>
+                          <div className="truncate font-mono text-[11px] text-[#6B7280]">{path}</div>
+                        </TableCell>
+
+                        <TableCell>
+                          <StatusChip value={String(it.decision || "ERROR")} size="sm" />
+                        </TableCell>
+
+                        <TableCell>
+                          <StatusChip value={String(it.decision_stage || "FAIL_STAGE")} type="stage" size="sm" />
+                        </TableCell>
+
+                        <TableCell className="font-mono text-[11px]">
+                          {typeof it.ai_score === "number" ? it.ai_score.toFixed(4) : "—"}
+                        </TableCell>
+
+                        <TableCell className="font-mono text-[11px]">
+                          {it.inject_attempted === 1
+                            ? `${it.inject_send === 1 ? "OK" : "FAIL"} / ${it.inject_status_code ?? "—"}`
+                            : "—"}
+                        </TableCell>
+
+                        <TableCell className="font-mono text-[11px] text-[#6B7280]">
+                          {it.reason || "—"}
+                        </TableCell>
+                      </TableRow>
+                    )
+                  })}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+
+          <div className="flex items-center justify-between rounded-md border bg-white px-4 py-3">
+            <div className="text-xs text-[#6B7280]">
+              {total === 0 ? "No results" : `Showing ${pageStart}-${pageEnd} of ${total.toLocaleString()}`}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={page <= 1 || tableLoading}
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+              >
+                Previous
+              </Button>
+
+              <span className="min-w-[88px] text-center text-xs text-[#6B7280]">
+                Page {page} / {totalPages}
+              </span>
+
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={page >= totalPages || tableLoading}
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              >
+                Next
+              </Button>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   )
 }
+

@@ -18,17 +18,39 @@ import { apiGetLogDetail, type AIAnalysisItem } from "@/lib/api-client"
 import { IncidentActionPanel } from "@/components/incident-action-panel"
 
 type MaybePromise<T> = T | Promise<T>
-type LogDetailPageProps = { params: MaybePromise<{ id: string }> }
 
-export default async function LogDetailPage({ params }: LogDetailPageProps) {
+type LogDetailPageProps = {
+  params: MaybePromise<{ id: string }>
+  searchParams?: MaybePromise<Record<string, string | string[] | undefined>>
+}
+
+function normalizeReturnTo(value: string | string[] | undefined, fallback: string): string {
+  const raw = Array.isArray(value) ? value[0] : value
+  if (!raw) return fallback
+
+  const isAllowed = (href: string) => href.startsWith("/logs") || href.startsWith("/incidents")
+
+  try {
+    const decoded = decodeURIComponent(raw)
+    if (isAllowed(decoded)) return decoded
+  } catch {
+    if (isAllowed(raw)) return raw
+  }
+
+  return fallback
+}
+
+export default async function LogDetailPage({ params, searchParams }: LogDetailPageProps) {
   const p = await Promise.resolve(params)
+  const sp = await Promise.resolve(searchParams)
   const logId = Number(p?.id)
+  const backHref = normalizeReturnTo(sp?.returnTo, "/logs")
 
   if (!Number.isFinite(logId)) {
     return (
       <div className="flex flex-col items-center justify-center gap-4 py-20">
         <p className="text-muted-foreground">Invalid log id</p>
-        <Link href="/logs">
+        <Link href={backHref}>
           <Button variant="outline" size="sm">
             Back to Logs
           </Button>
@@ -54,7 +76,7 @@ export default async function LogDetailPage({ params }: LogDetailPageProps) {
     return (
       <div className="flex flex-col items-center justify-center gap-4 py-20">
         <p className="text-muted-foreground">Log entry not found</p>
-        <Link href="/logs">
+        <Link href={backHref}>
           <Button variant="outline" size="sm">
             Back to Logs
           </Button>
@@ -82,7 +104,7 @@ export default async function LogDetailPage({ params }: LogDetailPageProps) {
           </BreadcrumbItem>
           <BreadcrumbSeparator />
           <BreadcrumbItem>
-            <BreadcrumbLink href="/logs">Logs</BreadcrumbLink>
+            <BreadcrumbLink href={backHref}>Logs</BreadcrumbLink>
           </BreadcrumbItem>
           <BreadcrumbSeparator />
           <BreadcrumbItem>
@@ -93,7 +115,7 @@ export default async function LogDetailPage({ params }: LogDetailPageProps) {
 
       <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-3">
-          <Link href="/logs">
+          <Link href={backHref}>
             <Button variant="ghost" size="sm" className="h-8 px-2">
               <ArrowLeft className="size-4" />
             </Button>
@@ -138,7 +160,7 @@ export default async function LogDetailPage({ params }: LogDetailPageProps) {
               <DetailRow label="URL Normalized" value={log.url_norm || "N/A"} mono />
               <div className="col-span-2">
                 <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">User Agent</dt>
-                <dd className="mt-0.5 text-xs font-mono text-foreground break-all">{log.user_agent || "N/A"}</dd>
+                <dd className="mt-0.5 break-all text-xs font-mono text-foreground">{log.user_agent || "N/A"}</dd>
               </div>
             </dl>
           </CardContent>
@@ -163,11 +185,11 @@ export default async function LogDetailPage({ params }: LogDetailPageProps) {
 
               <DetailRow label="Matched Policy">
                 {log.policy_id ? (
-                  <Link href={`/policies/${log.policy_id}`} className="text-primary hover:underline text-xs font-mono">
+                  <Link href={`/policies/${log.policy_id}`} className="text-xs font-mono text-primary hover:underline">
                     {String(log.policy_id)}
                   </Link>
                 ) : (
-                  <span className="text-muted-foreground text-xs">N/A</span>
+                  <span className="text-xs text-muted-foreground">N/A</span>
                 )}
               </DetailRow>
 
@@ -202,7 +224,9 @@ export default async function LogDetailPage({ params }: LogDetailPageProps) {
                 <DetailRow
                   label="Latency"
                   value={
-                    latestAI.latency_ms !== null && latestAI.latency_ms !== undefined ? `${latestAI.latency_ms}ms` : "N/A"
+                    latestAI.latency_ms !== null && latestAI.latency_ms !== undefined
+                      ? `${latestAI.latency_ms}ms`
+                      : "N/A"
                   }
                   mono
                 />
@@ -210,10 +234,10 @@ export default async function LogDetailPage({ params }: LogDetailPageProps) {
                 <DetailRow label="Error Code" value={latestAI.error_code || "None"} />
                 <DetailRow label="Analysis Seq" value={String(latestAI.analysis_seq ?? 0)} />
                 <div className="col-span-2">
-                  <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider mb-1">
+                  <dt className="mb-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
                     AI Response
                   </dt>
-                  <dd className="rounded-md bg-muted p-3 text-xs text-foreground leading-relaxed break-all">
+                  <dd className="rounded-md bg-muted p-3 text-xs leading-relaxed text-foreground break-all">
                     {latestAI.ai_response || "N/A"}
                   </dd>
                 </div>
@@ -264,7 +288,7 @@ export default async function LogDetailPage({ params }: LogDetailPageProps) {
                     {String(log.inject_status_code)}
                   </Badge>
                 ) : (
-                  <span className="text-muted-foreground text-xs">N/A</span>
+                  <span className="text-xs text-muted-foreground">N/A</span>
                 )}
               </DetailRow>
             </dl>
@@ -273,7 +297,7 @@ export default async function LogDetailPage({ params }: LogDetailPageProps) {
       </div>
 
       {aiAnalyses.length > 1 && (
-        <Card className="border shadow-sm overflow-hidden">
+        <Card className="overflow-hidden border shadow-sm">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-semibold text-foreground">
               AI Analysis History ({aiAnalyses.length} runs)
@@ -332,10 +356,11 @@ function DetailRow({
 }) {
   return (
     <div>
-      <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">{label}</dt>
-      <dd className={`mt-0.5 ${mono ? "font-mono text-xs" : "text-sm"} text-foreground break-all`}>
+      <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">{label}</dt>
+      <dd className={`mt-0.5 break-all text-foreground ${mono ? "font-mono text-xs" : "text-sm"}`}>
         {children ?? value ?? "N/A"}
       </dd>
     </div>
   )
 }
+
