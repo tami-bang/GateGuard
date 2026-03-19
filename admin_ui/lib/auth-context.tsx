@@ -3,9 +3,6 @@
 import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from "react"
 import { type User, type UserRole } from "./mock-data"
 
-/**
- * 전역 currentUserId 저장소
- */
 let currentUserId: number | null = null
 
 export function getCurrentUserId(): number | null {
@@ -19,6 +16,7 @@ interface AuthContextType {
   login: (email: string, password: string) => Promise<boolean>
   logout: () => Promise<void>
   hasAccess: (page: string) => boolean
+  refreshSession: () => Promise<User | null>
 }
 
 const allPages = ["dashboard", "logs", "incidents", "policies", "ai-analysis", "audit-log"]
@@ -35,15 +33,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
   const [bootstrapped, setBootstrapped] = useState(false)
 
-  /**
-   * 초기 세션 복원 (/api/auth/me)
-   */
+  const refreshSession = useCallback(async (): Promise<User | null> => {
+    try {
+      const res = await fetch("/api/auth/me", {
+        method: "GET",
+        cache: "no-store",
+        credentials: "include",
+      })
+
+      if (!res.ok) {
+        setUser(null)
+        currentUserId = null
+        return null
+      }
+
+      const data = await res.json()
+      const nextUser = data.user ?? null
+
+      setUser(nextUser)
+      currentUserId = nextUser?.id ? Number(nextUser.id) : null
+
+      return nextUser
+    } catch {
+      setUser(null)
+      currentUserId = null
+      return null
+    }
+  }, [])
+
   useEffect(() => {
     let cancelled = false
 
     ;(async () => {
       try {
-        const res = await fetch("/api/auth/me", { method: "GET", cache: "no-store" })
+        const res = await fetch("/api/auth/me", {
+          method: "GET",
+          cache: "no-store",
+          credentials: "include",
+        })
+
         if (!res.ok) {
           if (!cancelled) {
             setUser(null)
@@ -55,8 +83,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const data = await res.json()
 
         if (!cancelled) {
-          setUser(data.user ?? null)
-          currentUserId = data.user?.id ?? null
+          const nextUser = data.user ?? null
+          setUser(nextUser)
+          currentUserId = nextUser?.id ? Number(nextUser.id) : null
         }
       } finally {
         if (!cancelled) setBootstrapped(true)
@@ -68,31 +97,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  /**
-   * 로그인
-   */
   const login = useCallback(async (email: string, password: string) => {
     const res = await fetch("/api/auth/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      credentials: "include",
       body: JSON.stringify({ email, password }),
     })
 
     if (!res.ok) return false
 
-    const data = await res.json()
-
-    setUser(data.user ?? null)
-    currentUserId = data.user?.id ?? null
-
+    await refreshSession()
     return true
-  }, [])
+  }, [refreshSession])
 
-  /**
-   * 로그아웃
-   */
   const logout = useCallback(async () => {
-    await fetch("/api/auth/logout", { method: "POST" }).catch(() => {})
+    await fetch("/api/auth/logout", {
+      method: "POST",
+      credentials: "include",
+    }).catch(() => {})
+
     setUser(null)
     currentUserId = null
   }, [])
@@ -106,7 +130,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   )
 
   return (
-    <AuthContext.Provider value={{ user, isAuthenticated: !!user, bootstrapped, login, logout, hasAccess }}>
+    <AuthContext.Provider
+      value={{
+        user,
+        isAuthenticated: !!user,
+        bootstrapped,
+        login,
+        logout,
+        hasAccess,
+        refreshSession,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   )

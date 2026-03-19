@@ -51,7 +51,7 @@ export default function LoginClient() {
 
   const nextPath = nextInfo.path
 
-  const { isAuthenticated, bootstrapped } = useAuth()
+  const { isAuthenticated, bootstrapped, refreshSession } = useAuth()
 
   const [mode, setMode] = useState<Mode>("login")
   const [stage, setStage] = useState<LoginStage>("credentials")
@@ -155,6 +155,7 @@ export default function LoginClient() {
         headers: {
           "Content-Type": "application/json",
         },
+        credentials: "include",
         body: JSON.stringify({
           email: email.trim(),
           password,
@@ -173,6 +174,12 @@ export default function LoginClient() {
         setOtp("")
         setError("")
         setFieldErrors({})
+        return
+      }
+
+      const sessionUser = await refreshSession()
+      if (!sessionUser) {
+        setError("Login succeeded but session restore failed. Please try again.")
         return
       }
 
@@ -205,6 +212,7 @@ export default function LoginClient() {
         headers: {
           "Content-Type": "application/json",
         },
+        credentials: "include",
         body: JSON.stringify({
           token: otp.replace(/\s+/g, ""),
         }),
@@ -214,6 +222,12 @@ export default function LoginClient() {
 
       if (!res.ok || !data?.ok) {
         setError("Invalid verification code. Please try again.")
+        return
+      }
+
+      const sessionUser = await refreshSession()
+      if (!sessionUser) {
+        setError("Verification succeeded but session restore failed. Please try again.")
         return
       }
 
