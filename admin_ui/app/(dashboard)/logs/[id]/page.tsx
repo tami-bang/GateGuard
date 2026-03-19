@@ -45,12 +45,13 @@ export default async function LogDetailPage({ params, searchParams }: LogDetailP
   const sp = await Promise.resolve(searchParams)
   const logId = Number(p?.id)
   const backHref = normalizeReturnTo(sp?.returnTo, "/logs")
+  const backLabel = backHref.startsWith("/incidents") ? "Incidents" : "Logs"
 
   if (!Number.isFinite(logId)) {
     return (
       <div className="flex flex-col items-center justify-center gap-4 py-20">
         <p className="text-muted-foreground">Invalid log id</p>
-        <Link href={backHref}>
+        <Link href={backHref} replace>
           <Button variant="outline" size="sm">
             Back to Logs
           </Button>
@@ -76,7 +77,7 @@ export default async function LogDetailPage({ params, searchParams }: LogDetailP
     return (
       <div className="flex flex-col items-center justify-center gap-4 py-20">
         <p className="text-muted-foreground">Log entry not found</p>
-        <Link href={backHref}>
+        <Link href={backHref} replace>
           <Button variant="outline" size="sm">
             Back to Logs
           </Button>
@@ -104,7 +105,7 @@ export default async function LogDetailPage({ params, searchParams }: LogDetailP
           </BreadcrumbItem>
           <BreadcrumbSeparator />
           <BreadcrumbItem>
-            <BreadcrumbLink href={backHref}>Logs</BreadcrumbLink>
+            <BreadcrumbLink href={backHref}>{backLabel}</BreadcrumbLink>
           </BreadcrumbItem>
           <BreadcrumbSeparator />
           <BreadcrumbItem>
@@ -115,7 +116,7 @@ export default async function LogDetailPage({ params, searchParams }: LogDetailP
 
       <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-3">
-          <Link href={backHref}>
+          <Link href={backHref} replace>
             <Button variant="ghost" size="sm" className="h-8 px-2">
               <ArrowLeft className="size-4" />
             </Button>
@@ -363,4 +364,3 @@ function DetailRow({
     </div>
   )
 }
-

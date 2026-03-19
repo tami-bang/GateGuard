@@ -212,7 +212,7 @@ export default function IncidentDetailPage() {
       <div className="flex flex-col items-center justify-center gap-4 py-20">
         <p className="text-muted-foreground">{err ?? "Incident not found"}</p>
         <div className="flex gap-2">
-          <Link href={backHref}>
+          <Link href={backHref} replace>
             <Button variant="outline" size="sm">
               Back to Incidents
             </Button>
@@ -245,7 +245,7 @@ export default function IncidentDetailPage() {
 
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex items-center gap-3">
-          <Link href={backHref}>
+          <Link href={backHref} replace>
             <Button variant="ghost" size="sm" className="h-8 px-2">
               <ArrowLeft className="size-4" />
             </Button>

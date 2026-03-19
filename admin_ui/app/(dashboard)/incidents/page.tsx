@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
 
@@ -45,14 +45,19 @@ type CachedIncidentList = {
   requestKey: string
 }
 
-const PAGE_SIZE = 10
-const CACHE_TTL_MS = 45_000
-const SUMMARY_CACHE_KEY = "gateguard:incidents:summary"
-
 type SessionCacheEnvelope<T> = {
   savedAt: number
   data: T
 }
+
+type IncidentsUrlState = {
+  status: IncidentStatusTab
+  page: number
+}
+
+const PAGE_SIZE = 10
+const CACHE_TTL_MS = 45_000
+const SUMMARY_CACHE_KEY = "gateguard:incidents:summary"
 
 function readSessionCache<T>(key: string): T | null {
   if (typeof window === "undefined") return null
@@ -175,8 +180,8 @@ export default function IncidentsPage() {
 
   const didHydrateFromUrl = useRef(false)
   const didInitialLoad = useRef(false)
-  const restoredFromCacheRef = useRef(false)
   const restoredRequestKeyRef = useRef("")
+  const lastFetchedRequestKeyRef = useRef("")
   const summaryCountsRef = useRef(summaryCounts)
   const lastUrlSnapshotRef = useRef("")
 
@@ -213,20 +218,24 @@ export default function IncidentsPage() {
 
   const cacheKey = useMemo(() => `gateguard:incidents:${currentListHref}`, [currentListHref])
 
-  useEffect(() => {
-    if (!didHydrateFromUrl.current) return
+  const syncUrl = useCallback(
+    (nextState: IncidentsUrlState) => {
+      const nextQuery = buildIncidentsQuery(nextState.status, nextState.page)
+      const nextHref = nextQuery ? `${pathname}?${nextQuery}` : pathname
+      const currentQuery = searchParams.toString()
+      const currentHref = currentQuery ? `${pathname}?${currentQuery}` : pathname
 
-    const current = searchParams.toString()
-    if (current === listQueryString) return
+      if (nextHref === currentHref) return
 
-    router.replace(listQueryString ? `${pathname}?${listQueryString}` : pathname, { scroll: false })
-  }, [listQueryString, pathname, router, searchParams])
+      router.replace(nextHref, { scroll: false })
+    },
+    [pathname, router, searchParams]
+  )
 
   useEffect(() => {
     const cached = readSessionCache<CachedIncidentList>(cacheKey)
 
     if (!cached?.payload) {
-      restoredFromCacheRef.current = false
       restoredRequestKeyRef.current = ""
       return
     }
@@ -243,8 +252,8 @@ export default function IncidentsPage() {
     setTableLoading(false)
     setError("")
     didInitialLoad.current = true
-    restoredFromCacheRef.current = true
     restoredRequestKeyRef.current = cached.requestKey || ""
+    lastFetchedRequestKeyRef.current = cached.requestKey || ""
   }, [cacheKey])
 
   useEffect(() => {
@@ -277,6 +286,7 @@ export default function IncidentsPage() {
         }
 
         setSummaryCounts(nextSummaryCounts)
+        summaryCountsRef.current = nextSummaryCounts
         writeSessionCache(SUMMARY_CACHE_KEY, nextSummaryCounts)
       } catch {
         if (!alive) return
@@ -293,20 +303,26 @@ export default function IncidentsPage() {
     }
   }, [])
 
-  const requestKey = useMemo(() => JSON.stringify({ status: activeTab, page, sort: "created_at", dir: "desc", limit: PAGE_SIZE }), [activeTab, page])
+  const requestKey = useMemo(
+    () => JSON.stringify({ status: activeTab, page, sort: "created_at", dir: "desc", limit: PAGE_SIZE }),
+    [activeTab, page]
+  )
 
   useEffect(() => {
     let alive = true
 
     async function load() {
+      if (!didHydrateFromUrl.current) return
+
       try {
         if (restoredRequestKeyRef.current && restoredRequestKeyRef.current === requestKey) {
-          restoredFromCacheRef.current = false
+          restoredRequestKeyRef.current = ""
+          lastFetchedRequestKeyRef.current = requestKey
           return
         }
 
-        if (restoredFromCacheRef.current) {
-          restoredFromCacheRef.current = false
+        if (lastFetchedRequestKeyRef.current === requestKey) {
+          return
         }
 
         if (didInitialLoad.current) {
@@ -330,6 +346,7 @@ export default function IncidentsPage() {
         setItems(res.items ?? [])
         setTotal(res.total ?? 0)
         didInitialLoad.current = true
+        lastFetchedRequestKeyRef.current = requestKey
 
         const cached: IncidentListCache = {
           items: res.items ?? [],
@@ -341,7 +358,6 @@ export default function IncidentsPage() {
           payload: cached,
           requestKey,
         })
-        restoredRequestKeyRef.current = requestKey
       } catch (e: any) {
         if (!alive) return
         setError(e?.message ?? "Failed to load incidents")
@@ -358,6 +374,12 @@ export default function IncidentsPage() {
       alive = false
     }
   }, [activeTab, page, cacheKey, requestKey])
+
+  function commitState(nextState: IncidentsUrlState) {
+    setActiveTab(nextState.status)
+    setPage(nextState.page)
+    syncUrl(nextState)
+  }
 
   const totalPages = useMemo(() => {
     return Math.max(1, Math.ceil(total / PAGE_SIZE))
@@ -454,8 +476,10 @@ export default function IncidentsPage() {
       <Tabs
         value={activeTab}
         onValueChange={(value) => {
-          setActiveTab(value as IncidentStatusTab)
-          setPage(1)
+          commitState({
+            status: value as IncidentStatusTab,
+            page: 1,
+          })
         }}
       >
         <TabsList>
@@ -600,7 +624,12 @@ export default function IncidentsPage() {
                   variant="outline"
                   size="sm"
                   disabled={page <= 1 || tableLoading}
-                  onClick={() => setPage((prev) => Math.max(1, prev - 1))}
+                  onClick={() =>
+                    commitState({
+                      status: activeTab,
+                      page: Math.max(1, page - 1),
+                    })
+                  }
                 >
                   Previous
                 </Button>
@@ -613,7 +642,12 @@ export default function IncidentsPage() {
                   variant="outline"
                   size="sm"
                   disabled={page >= totalPages || tableLoading}
-                  onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}
+                  onClick={() =>
+                    commitState({
+                      status: activeTab,
+                      page: Math.min(totalPages, page + 1),
+                    })
+                  }
                 >
                   Next
                 </Button>
@@ -625,4 +659,3 @@ export default function IncidentsPage() {
     </div>
   )
 }
-

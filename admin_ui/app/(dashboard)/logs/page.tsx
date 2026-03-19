@@ -1,6 +1,6 @@
 "use client"
 
-import { Suspense, useEffect, useMemo, useRef, useState } from "react"
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import Link from "next/link"
 
@@ -27,6 +27,7 @@ import { Search, X, MessageSquare, Filter, ShieldAlert, Bot, FileText, AlertTria
 import { apiListLogs, type AccessLogItem, type ListLogsResponse } from "@/lib/api-client"
 
 const PAGE_SIZE = 15
+const CACHE_TTL_MS = 45_000
 
 type FiltersState = {
   decision: string
@@ -58,7 +59,6 @@ const INITIAL_FILTERS: FiltersState = {
 
 const ALLOWED_DECISIONS = new Set(["ALLOW", "BLOCK", "REVIEW", "ERROR"])
 const ALLOWED_STAGES = new Set(["POLICY_STAGE", "AI_STAGE", "FAIL_STAGE"])
-const CACHE_TTL_MS = 45_000
 
 type SessionCacheEnvelope<T> = {
   savedAt: number
@@ -68,6 +68,20 @@ type SessionCacheEnvelope<T> = {
 type LogsCachePayload = {
   response: ListLogsResponse
   requestKey: string
+}
+
+type QuickFilterItem = {
+  key: string
+  label: string
+  icon: React.ComponentType<{ className?: string }>
+  onClick: () => void
+}
+
+type LogsUrlState = {
+  filters: FiltersState
+  page: number
+  sortField: string
+  sortDir: "asc" | "desc"
 }
 
 function readSessionCache<T>(key: string): T | null {
@@ -119,48 +133,6 @@ function isSameFilters(a: FiltersState, b: FiltersState): boolean {
     a.injectAttempted === b.injectAttempted &&
     a.injectSend === b.injectSend &&
     a.injectStatusCode === b.injectStatusCode
-  )
-}
-
-type QuickFilterItem = {
-  key: string
-  label: string
-  icon: React.ComponentType<{ className?: string }>
-  onClick: () => void
-}
-
-export default function LogsPage() {
-  return (
-    <Suspense fallback={<LogsPageSkeleton />}>
-      <LogsPageInner />
-    </Suspense>
-  )
-}
-
-function LogsPageSkeleton() {
-  return (
-    <div className="flex flex-col gap-4">
-      <Breadcrumb>
-        <BreadcrumbList>
-          <BreadcrumbItem>
-            <BreadcrumbLink href="/dashboard">Dashboard</BreadcrumbLink>
-          </BreadcrumbItem>
-          <BreadcrumbSeparator />
-          <BreadcrumbItem>
-            <BreadcrumbPage>Logs</BreadcrumbPage>
-          </BreadcrumbItem>
-        </BreadcrumbList>
-      </Breadcrumb>
-
-      <div>
-        <h1 className="text-xl font-semibold text-foreground">Access Logs</h1>
-        <p className="text-sm text-muted-foreground">Loading...</p>
-      </div>
-
-      <Card className="border shadow-sm">
-        <CardContent className="p-6 text-sm text-muted-foreground">Fetching logs from FastAPI...</CardContent>
-      </Card>
-    </div>
   )
 }
 
@@ -273,6 +245,41 @@ function buildLogsQuery(params: {
   return qs.toString()
 }
 
+export default function LogsPage() {
+  return (
+    <Suspense fallback={<LogsPageSkeleton />}>
+      <LogsPageInner />
+    </Suspense>
+  )
+}
+
+function LogsPageSkeleton() {
+  return (
+    <div className="flex flex-col gap-4">
+      <Breadcrumb>
+        <BreadcrumbList>
+          <BreadcrumbItem>
+            <BreadcrumbLink href="/dashboard">Dashboard</BreadcrumbLink>
+          </BreadcrumbItem>
+          <BreadcrumbSeparator />
+          <BreadcrumbItem>
+            <BreadcrumbPage>Logs</BreadcrumbPage>
+          </BreadcrumbItem>
+        </BreadcrumbList>
+      </Breadcrumb>
+
+      <div>
+        <h1 className="text-xl font-semibold text-foreground">Access Logs</h1>
+        <p className="text-sm text-muted-foreground">Loading...</p>
+      </div>
+
+      <Card className="border shadow-sm">
+        <CardContent className="p-6 text-sm text-muted-foreground">Fetching logs from FastAPI...</CardContent>
+      </Card>
+    </div>
+  )
+}
+
 function LogsPageInner() {
   const router = useRouter()
   const pathname = usePathname()
@@ -286,13 +293,13 @@ function LogsPageInner() {
 
   const [initialLoading, setInitialLoading] = useState(true)
   const [tableLoading, setTableLoading] = useState(false)
-  const [error, setError] = useState<string>("")
+  const [error, setError] = useState("")
   const [data, setData] = useState<ListLogsResponse | null>(null)
 
   const didHydrateFromUrl = useRef(false)
   const didInitialLoad = useRef(false)
-  const restoredFromCacheRef = useRef(false)
   const restoredRequestKeyRef = useRef("")
+  const lastFetchedRequestKeyRef = useRef("")
   const lastUrlSnapshotRef = useRef("")
 
   useEffect(() => {
@@ -366,21 +373,24 @@ function LogsPageInner() {
 
   const cacheKey = useMemo(() => `gateguard:logs:${currentListHref}`, [currentListHref])
 
-  useEffect(() => {
-    if (!didHydrateFromUrl.current) return
-    if (restoredFromCacheRef.current) return
+  const syncUrl = useCallback(
+    (nextState: LogsUrlState) => {
+      const nextQuery = buildLogsQuery(nextState)
+      const nextHref = nextQuery ? `${pathname}?${nextQuery}` : pathname
+      const currentQuery = searchParams.toString()
+      const currentHref = currentQuery ? `${pathname}?${currentQuery}` : pathname
 
-    const current = searchParams.toString()
-    if (current === listQueryString) return
+      if (nextHref === currentHref) return
 
-    router.replace(listQueryString ? `${pathname}?${listQueryString}` : pathname, { scroll: false })
-  }, [listQueryString, pathname, router, searchParams])
+      router.replace(nextHref, { scroll: false })
+    },
+    [pathname, router, searchParams]
+  )
 
   useEffect(() => {
     const cached = readSessionCache<LogsCachePayload>(cacheKey)
 
     if (!cached?.response) {
-      restoredFromCacheRef.current = false
       restoredRequestKeyRef.current = ""
       return
     }
@@ -390,8 +400,8 @@ function LogsPageInner() {
     setTableLoading(false)
     setError("")
     didInitialLoad.current = true
-    restoredFromCacheRef.current = true
     restoredRequestKeyRef.current = cached.requestKey || ""
+    lastFetchedRequestKeyRef.current = cached.requestKey || ""
   }, [cacheKey])
 
   const debounceSettled =
@@ -444,17 +454,17 @@ function LogsPageInner() {
     let cancelled = false
 
     async function run() {
-      if (!debounceSettled) {
-        return
-      }
+      if (!didHydrateFromUrl.current) return
+      if (!debounceSettled) return
 
       if (restoredRequestKeyRef.current && restoredRequestKeyRef.current === requestKey) {
-        restoredFromCacheRef.current = false
+        restoredRequestKeyRef.current = ""
+        lastFetchedRequestKeyRef.current = requestKey
         return
       }
 
-      if (restoredFromCacheRef.current) {
-        restoredFromCacheRef.current = false
+      if (lastFetchedRequestKeyRef.current === requestKey) {
+        return
       }
 
       if (didInitialLoad.current) {
@@ -471,8 +481,8 @@ function LogsPageInner() {
 
         setData(res)
         didInitialLoad.current = true
+        lastFetchedRequestKeyRef.current = requestKey
         writeSessionCache<LogsCachePayload>(cacheKey, { response: res, requestKey })
-      restoredRequestKeyRef.current = requestKey
       } catch (e: any) {
         if (cancelled) return
         setError(e?.message || "Failed to load logs")
@@ -496,82 +506,124 @@ function LogsPageInner() {
   const pageStart = total === 0 ? 0 : offset + 1
   const pageEnd = Math.min(offset + items.length, total)
 
+  function commitState(nextState: LogsUrlState) {
+    setFilters(nextState.filters)
+    setPage(nextState.page)
+    setSortField(nextState.sortField)
+    setSortDir(nextState.sortDir)
+    syncUrl(nextState)
+  }
+
   function handleSort(field: string) {
-    if (sortField === field) {
-      setSortDir((d) => (d === "asc" ? "desc" : "asc"))
-    } else {
-      setSortField(field)
-      setSortDir("desc")
-    }
-    setPage(1)
+    const nextSortField = sortField === field ? sortField : field
+    const nextSortDir = sortField === field ? (sortDir === "asc" ? "desc" : "asc") : "desc"
+
+    commitState({
+      filters,
+      page: 1,
+      sortField: nextSortField,
+      sortDir: nextSortDir,
+    })
   }
 
   function clearFilters() {
-    setFilters(INITIAL_FILTERS)
-    setPage(1)
-    setSortField("detect_timestamp")
-    setSortDir("desc")
+    commitState({
+      filters: INITIAL_FILTERS,
+      page: 1,
+      sortField: "detect_timestamp",
+      sortDir: "desc",
+    })
   }
 
   function updateFilter<K extends keyof FiltersState>(key: K, value: FiltersState[K]) {
-    setFilters((prev) => ({
-      ...prev,
+    const nextFilters = {
+      ...filters,
       [key]: value,
-    }))
-    setPage(1)
+    }
+
+    commitState({
+      filters: nextFilters,
+      page: 1,
+      sortField,
+      sortDir,
+    })
   }
 
   function applyQuickFilterBlockOnly() {
-    setFilters((prev) => ({
-      ...prev,
-      decision: "BLOCK",
-    }))
-    setPage(1)
+    commitState({
+      filters: {
+        ...filters,
+        decision: "BLOCK",
+      },
+      page: 1,
+      sortField,
+      sortDir,
+    })
   }
 
   function applyQuickFilterAiStage() {
-    setFilters((prev) => ({
-      ...prev,
-      decision: "BLOCK",
-      stage: "AI_STAGE",
-    }))
-    setPage(1)
+    commitState({
+      filters: {
+        ...filters,
+        decision: "BLOCK",
+        stage: "AI_STAGE",
+      },
+      page: 1,
+      sortField,
+      sortDir,
+    })
   }
 
   function applyQuickFilterPolicyStage() {
-    setFilters((prev) => ({
-      ...prev,
-      decision: "BLOCK",
-      stage: "POLICY_STAGE",
-    }))
-    setPage(1)
+    commitState({
+      filters: {
+        ...filters,
+        decision: "BLOCK",
+        stage: "POLICY_STAGE",
+      },
+      page: 1,
+      sortField,
+      sortDir,
+    })
   }
 
   function applyQuickFilterFailStage() {
-    setFilters((prev) => ({
-      ...prev,
-      stage: "FAIL_STAGE",
-    }))
-    setPage(1)
+    commitState({
+      filters: {
+        ...filters,
+        stage: "FAIL_STAGE",
+      },
+      page: 1,
+      sortField,
+      sortDir,
+    })
   }
 
   function applyQuickFilterLast24h() {
     const range = getRangePreset(24)
-    setFilters((prev) => ({
-      ...prev,
-      startTime: range.startTime,
-      endTime: range.endTime,
-    }))
-    setPage(1)
+    commitState({
+      filters: {
+        ...filters,
+        startTime: range.startTime,
+        endTime: range.endTime,
+      },
+      page: 1,
+      sortField,
+      sortDir,
+    })
   }
 
   function applyQuickFilterInjectionFail() {
-    setFilters((prev) => ({
-      ...prev,
-      injectAttempted: "1",
-      injectSend: "0",
-    }))
-    setPage(1)
+    commitState({
+      filters: {
+        ...filters,
+        injectAttempted: "1",
+        injectSend: "0",
+      },
+      page: 1,
+      sortField,
+      sortDir,
+    })
   }
 
   const quickFilters: QuickFilterItem[] = [
@@ -854,7 +906,7 @@ function LogsPageInner() {
           </div>
 
           <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Start Time</label>
+            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Start</label>
             <Input
               type="datetime-local"
               value={filters.startTime}
@@ -864,7 +916,7 @@ function LogsPageInner() {
           </div>
 
           <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">End Time</label>
+            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">End</label>
             <Input
               type="datetime-local"
               value={filters.endTime}
@@ -877,13 +929,11 @@ function LogsPageInner() {
             <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Min Score</label>
             <Input
               type="number"
-              min="0"
-              max="1"
               step="0.0001"
-              placeholder="0.0000"
+              placeholder="0.5000"
               value={filters.minScore}
               onChange={(e) => updateFilter("minScore", e.target.value)}
-              className="h-8 w-[120px] text-xs"
+              className="h-8 w-[110px] text-xs"
             />
           </div>
 
@@ -891,13 +941,11 @@ function LogsPageInner() {
             <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Max Score</label>
             <Input
               type="number"
-              min="0"
-              max="1"
               step="0.0001"
               placeholder="1.0000"
               value={filters.maxScore}
               onChange={(e) => updateFilter("maxScore", e.target.value)}
-              className="h-8 w-[120px] text-xs"
+              className="h-8 w-[110px] text-xs"
             />
           </div>
 
@@ -1113,7 +1161,14 @@ function LogsPageInner() {
                 variant="outline"
                 size="sm"
                 disabled={page <= 1 || tableLoading}
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                onClick={() =>
+                  commitState({
+                    filters,
+                    page: Math.max(1, page - 1),
+                    sortField,
+                    sortDir,
+                  })
+                }
               >
                 Previous
               </Button>
@@ -1126,7 +1181,14 @@ function LogsPageInner() {
                 variant="outline"
                 size="sm"
                 disabled={page >= totalPages || tableLoading}
-                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                onClick={() =>
+                  commitState({
+                    filters,
+                    page: Math.min(totalPages, page + 1),
+                    sortField,
+                    sortDir,
+                  })
+                }
               >
                 Next
               </Button>
@@ -1137,4 +1199,3 @@ function LogsPageInner() {
     </div>
   )
 }
-
