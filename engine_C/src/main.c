@@ -16,15 +16,13 @@
 #include <mysql/mysql.h>
 
 // runtime config helpers
-static const char* get_env_str(const char* key, const char* def)
-{
+static const char* get_env_str(const char* key, const char* def) {
     const char* v = getenv(key);
     if (!v || !v[0]) return def;
     return v;
 }
 
-static int get_env_int(const char* key, int def)
-{
+static int get_env_int(const char* key, int def) {
     const char* v = getenv(key);
     if (!v || !v[0]) return def;
 
@@ -34,8 +32,7 @@ static int get_env_int(const char* key, int def)
     return (int)n;
 }
 
-static double get_env_double(const char* key, double def)
-{
+static double get_env_double(const char* key, double def) {
     const char* v = getenv(key);
     if (!v || !v[0]) return def;
 
@@ -45,15 +42,13 @@ static double get_env_double(const char* key, double def)
     return n;
 }
 
-static int64_t now_ms(void)
-{
+static int64_t now_ms(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return (int64_t)tv.tv_sec * 1000 + (int64_t)tv.tv_usec / 1000;
 }
 
-static int calc_engine_latency_ms(const HttpEvent* ev)
-{
+static int calc_engine_latency_ms(const HttpEvent* ev) {
     if (!ev || ev->detect_ts_ms <= 0) return -1;
 
     int64_t cur = now_ms();
@@ -62,8 +57,7 @@ static int calc_engine_latency_ms(const HttpEvent* ev)
     return (int)(cur - ev->detect_ts_ms);
 }
 
-static void build_score_endpoint(char* out, size_t outsz)
-{
+static void build_score_endpoint(char* out, size_t outsz) {
     const char* base = get_env_str("AI_BASE_URL", "http://127.0.0.1:8000");
     if (!out || outsz == 0) return;
 
@@ -77,31 +71,67 @@ static void build_score_endpoint(char* out, size_t outsz)
 /* -------------------------
  * 내부/관리 UI 노이즈 필터
  * - source IP는 필터 기준이 아님
- * - host/path 성격으로 필터링
+ * - host/server_port + path 성격으로 필터링
+ * - 외부 Next.js 사이트까지 전역 제외하지 않도록
+ *   "admin 요청인지" 먼저 판단한 뒤 제외
  * ------------------------- */
-static int starts_with_path(const char* path, const char* prefix)
-{
+static int starts_with_path(const char* path, const char* prefix) {
     if (!path || !prefix) return 0;
     size_t n = strlen(prefix);
     return strncmp(path, prefix, n) == 0;
 }
 
-static int is_internal_admin_host(const char* host)
-{
-    if (!host || !host[0]) return 0;
+static int ends_with_str(const char* s, const char* suffix) {
+    if (!s || !suffix) return 0;
 
-    return (
-        strcasecmp(host, "192.168.1.24:8080") == 0 ||
-        strcasecmp(host, "localhost:8080") == 0 ||
-        strcasecmp(host, "127.0.0.1:8080") == 0
-    );
+    size_t slen = strlen(s);
+    size_t tlen = strlen(suffix);
+
+    if (slen < tlen) return 0;
+    return strcmp(s + slen - tlen, suffix) == 0;
 }
 
-static int is_internal_admin_path(const char* path)
-{
+static int contains_admin_next_param(const char* path) {
     if (!path || !path[0]) return 0;
 
     return (
+        starts_with_path(path, "/?next=") ||
+        strstr(path, "?next=") != NULL ||
+        strstr(path, "&next=") != NULL
+    );
+}
+
+static int is_internal_admin_host(const char* host) {
+    if (!host || !host[0]) return 0;
+
+    return (
+        strcasecmp(host, "localhost") == 0 ||
+        strcasecmp(host, "127.0.0.1") == 0 ||
+        strcasecmp(host, "localhost:8080") == 0 ||
+        strcasecmp(host, "127.0.0.1:8080") == 0 ||
+        ends_with_str(host, ":8080")
+    );
+}
+
+static int is_internal_admin_request(const HttpEvent* ev) {
+    if (!ev) return 0;
+
+    if ((int)ev->meta.server_port == 8080) {
+        return 1;
+    }
+
+    if (is_internal_admin_host(ev->host)) {
+        return 1;
+    }
+
+    return 0;
+}
+
+static int is_internal_admin_path(const char* path) {
+    if (!path || !path[0]) return 0;
+
+    return (
+        strcmp(path, "/") == 0               ||
         starts_with_path(path, "/dashboard")   ||
         starts_with_path(path, "/logs")        ||
         starts_with_path(path, "/policies")    ||
@@ -110,39 +140,65 @@ static int is_internal_admin_path(const char* path)
         starts_with_path(path, "/audit-log")   ||
         starts_with_path(path, "/settings")    ||
         starts_with_path(path, "/login")       ||
-        starts_with_path(path, "/sign-up")
+        starts_with_path(path, "/sign-up")     ||
+        strcmp(path, "/api/auth") == 0         ||
+        starts_with_path(path, "/api/auth/")   ||
+        strcmp(path, "/favicon.ico") == 0      ||
+        contains_admin_next_param(path)
     );
 }
 
-static int is_next_internal_request(const char* path)
-{
+static int is_next_internal_request(const char* path) {
     if (!path || !path[0]) return 0;
 
-    if (strstr(path, "?_rsc=") != NULL) return 1;
+    if (strstr(path, "_rsc=") != NULL) return 1;
     if (strstr(path, "/_next/") != NULL) return 1;
 
     return 0;
 }
 
-static int should_skip_noise_event(const HttpEvent* ev)
-{
+static int is_admin_noise_path(const char* path) {
+    if (!path || !path[0]) return 0;
+
+    return (
+        is_internal_admin_path(path) ||
+        is_next_internal_request(path)
+    );
+}
+
+static int is_dev_ai_test_request(const HttpEvent* ev) {
+    if (!ev) return 0;
+
+    if ((int)ev->meta.server_port != 8080) return 0;
+    if (!ev->path) return 0;
+
+    return (
+        strcmp(ev->path, "/score-check") == 0 ||
+        strcmp(ev->path, "/test-ai") == 0 ||
+        strcmp(ev->path, "/gg-ai-test") == 0
+    );
+}
+
+static int should_skip_noise_event(const HttpEvent* ev) {
     if (!ev) return 1;
 
-    // Next.js 내부 요청은 별도 제외
-    if (is_next_internal_request(ev->path)) {
-        return 1;
+    if (is_dev_ai_test_request(ev)) {
+        return 0;
     }
 
-    // 관리자 UI host + 관리자 UI path 조합만 제외
-    if (is_internal_admin_host(ev->host) && is_internal_admin_path(ev->path)) {
+    /*
+     * 핵심:
+     * 외부 정상 웹사이트의 /login, /favicon.ico, /_next/, _rsc 요청까지
+     * 전역 제외하면 안 되므로 "admin 요청"으로 먼저 식별한 뒤 skip.
+     */
+    if (is_internal_admin_request(ev) && is_admin_noise_path(ev->path)) {
         return 1;
     }
 
     return 0;
 }
 
-static int is_ai_test_signature(const HttpEvent* ev)
-{
+static int is_ai_test_signature(const HttpEvent* ev) {
     if (!ev) return 0;
 
     if (strcmp(ev->meta.client_ip, "127.0.0.1") != 0 &&
@@ -150,23 +206,22 @@ static int is_ai_test_signature(const HttpEvent* ev)
         return 0;
     }
 
-    if (strcasecmp(ev->host, "aitest.gateguard.local") != 0) {
+    if (!ev->host || strcasecmp(ev->host, "aitest.gateguard.local") != 0) {
         return 0;
     }
 
-    if (strcmp(ev->method, "GET") != 0) {
+    if (!ev->method || strcmp(ev->method, "GET") != 0) {
         return 0;
     }
 
-    if (strcmp(ev->path, "/score-check") != 0) {
+    if (!ev->path || strcmp(ev->path, "/score-check") != 0) {
         return 0;
     }
 
     return 1;
 }
 
-static int should_bypass_policy_for_ai_test(const HttpEvent* ev)
-{
+static int should_bypass_policy_for_ai_test(const HttpEvent* ev) {
     return is_ai_test_signature(ev);
 }
 
@@ -175,8 +230,7 @@ static MYSQL* g_conn = NULL;
 static policy_cache_t g_cache;
 
 // DB 연결
-static MYSQL* db_connect(void)
-{
+static MYSQL* db_connect(void) {
     const char* db_host = get_env_str("DB_HOST", "127.0.0.1");
     int db_port = get_env_int("DB_PORT", 3306);
     const char* db_user = get_env_str("DB_USER", "gateguard");
@@ -205,8 +259,7 @@ static MYSQL* db_connect(void)
     return conn;
 }
 
-static const char* ai_error_to_code(const ai_result_t* ar, char* out, size_t outsz)
-{
+static const char* ai_error_to_code(const ai_result_t* ar, char* out, size_t outsz) {
     if (!out || outsz == 0) return "";
     out[0] = '\0';
 
@@ -241,8 +294,7 @@ static const char* ai_error_to_code(const ai_result_t* ar, char* out, size_t out
 }
 
 // 핵심 엔진 처리
-void engine_handle_http_event(const HttpEvent* ev)
-{
+void engine_handle_http_event(const HttpEvent* ev) {
     if (!ev || !ev->is_http) return;
 
     /* 관리 UI / 내부 요청 노이즈는 여기서 조기 제외 */
@@ -275,10 +327,10 @@ void engine_handle_http_event(const HttpEvent* ev)
                      ev->host,
                      ev->path,
                      ev->url_norm);
-	
-	if (should_bypass_policy_for_ai_test(ev)) {
-		 memset(&d, 0, sizeof(d));
-	}
+
+    if (should_bypass_policy_for_ai_test(ev)) {
+        memset(&d, 0, sizeof(d));
+    }
 
     if (d.matched)
     {
@@ -352,8 +404,7 @@ void engine_handle_http_event(const HttpEvent* ev)
 }
 
 // main
-int main(int argc, char** argv)
-{
+int main(int argc, char** argv) {
     const char* ifname = get_env_str("CAP_IFACE", "enp0s3");
     if (argc >= 2 && argv[1] && argv[1][0]) {
         ifname = argv[1];
