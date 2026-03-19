@@ -12,6 +12,7 @@ import {
   Shield,
   ChevronLeft,
   ChevronRight,
+  Users,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { useAuth } from "@/lib/auth-context"
@@ -33,6 +34,7 @@ const navItems: NavItem[] = [
   { label: "Policies", href: "/policies", icon: FileText, page: "policies" },
   { label: "AI Analysis", href: "/ai-analysis", icon: Brain, page: "ai-analysis" },
   { label: "Audit Log", href: "/audit-log", icon: ClipboardList, page: "audit-log" },
+  { label: "Users", href: "/users", icon: Users, page: "users" },
 ]
 
 export function AppSidebar() {
@@ -146,6 +148,7 @@ export function AppSidebar() {
 
       <div className="border-t p-2" style={{ borderColor: "var(--sidebar-border)" }}>
         <button
+          type="button"
           onClick={() => setCollapsed(!collapsed)}
           className="flex w-full items-center justify-center rounded-md py-2 transition-colors"
           style={{ color: "var(--sidebar-muted)" }}
@@ -155,6 +158,7 @@ export function AppSidebar() {
           onMouseLeave={(e) => {
             e.currentTarget.style.backgroundColor = "transparent"
           }}
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
         >
           {collapsed ? <ChevronRight className="size-4" /> : <ChevronLeft className="size-4" />}
         </button>

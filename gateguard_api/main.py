@@ -1173,6 +1173,103 @@ def _touch_policy_updated(cur, conn, policy_id: int, user_id: int) -> None:
         _update_dynamic(cur, "policy", "policy_id", int(policy_id), upd)
 
 # =========================
+# User / Account API
+# =========================
+
+@app.get("/v1/users")
+@app.get("/users")
+def list_users(
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    q: Optional[str] = None,
+    role: Optional[str] = None,
+    is_active: Optional[int] = None,
+    is_2fa_enabled: Optional[int] = None,
+    sort: str = Query("created_at"),
+    dir: str = Query("desc"),
+):
+    with db_conn() as conn:
+        cols = _get_table_cols(conn, "user_account")
+
+        where = []
+        params: List[Any] = []
+
+        if q:
+            q_like = f"%{q}%"
+            q_parts = []
+
+            if "username" in cols:
+                q_parts.append("username LIKE %s")
+                params.append(q_like)
+
+            if "name" in cols:
+                q_parts.append("name LIKE %s")
+                params.append(q_like)
+
+            if "email" in cols:
+                q_parts.append("email LIKE %s")
+                params.append(q_like)
+
+            if q_parts:
+                where.append("(" + " OR ".join(q_parts) + ")")
+
+        if role and "role" in cols:
+            where.append("role = %s")
+            params.append(role)
+
+        if is_active is not None and "is_active" in cols:
+            where.append("is_active = %s")
+            params.append(int(is_active))
+
+        if is_2fa_enabled is not None and "is_2fa_enabled" in cols:
+            where.append("is_2fa_enabled = %s")
+            params.append(int(is_2fa_enabled))
+
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
+        allowed_sort = [c for c in ["created_at", "last_login_at", "id", "username", "name", "email", "role"] if c in cols]
+        if sort not in allowed_sort:
+            sort = "created_at" if "created_at" in cols else (allowed_sort[0] if allowed_sort else "id")
+
+        if (dir or "").lower() not in ("asc", "desc"):
+            dir = "desc"
+
+        order_sql = f"ORDER BY {sort} {dir.upper()}"
+
+        select_cols = []
+        for col in ["id", "username", "name", "email", "role", "is_active", "is_2fa_enabled", "created_at", "last_login_at"]:
+            if col in cols:
+                select_cols.append(col)
+
+        if not select_cols:
+            raise HTTPException(status_code=500, detail="user_account table columns not available")
+
+        count_sql = f"SELECT COUNT(*) AS cnt FROM user_account {where_sql}"
+        data_sql = f"""
+        SELECT {", ".join(select_cols)}
+        FROM user_account
+        {where_sql}
+        {order_sql}
+        LIMIT %s OFFSET %s
+        """
+
+        with conn.cursor() as cur:
+            cur.execute(count_sql, params)
+            total = int(cur.fetchone()["cnt"])
+
+            cur.execute(data_sql, params + [limit, offset])
+            rows = cur.fetchall() or []
+
+    return {
+        "items": rows,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "sort": sort,
+        "dir": dir,
+    }
+
+# =========================
 # Policy API (policy, policy_rule)
 # =========================
 
@@ -1305,6 +1402,8 @@ def list_policies(
     policy_type: Optional[str] = None,
     action: Optional[str] = None,
     is_enabled: Optional[int] = None,
+    risk_level: Optional[str] = None,
+    category: Optional[str] = None,
     sort: str = Query("created_at"),
     dir: str = Query("desc"),
 ):
@@ -1331,6 +1430,14 @@ def list_policies(
         if is_enabled is not None and "is_enabled" in cols:
                 where.append("is_enabled=%s")
                 params.append(int(is_enabled))
+        
+        if risk_level and "risk_level" in cols:
+            where.append("risk_level=%s")
+            params.append(risk_level)
+
+        if category and "category" in cols:
+            where.append("category LIKE %s")
+            params.append(f"%{category}%")
 
         where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
@@ -1340,6 +1447,14 @@ def list_policies(
 
         if (dir or "").lower() not in ("asc", "desc"):
             dir = "desc"
+
+        if risk_level and "risk_level" in cols:
+            where.append("risk_level=%s")
+            params.append(risk_level)
+        
+        if category and "category" in cols:
+            where.append("category LIKE %s")
+            params.append(f"%{category}%")
 
         order_sql = f"ORDER BY {sort} {dir.upper()}"
 

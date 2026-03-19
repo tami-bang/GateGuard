@@ -652,12 +652,24 @@ Policy API
 export async function apiListPolicies(params?: {
   limit?: number
   offset?: number
+  q?: string
+  policy_type?: string
+  action?: string
+  is_enabled?: number
+  risk_level?: string
+  category?: string
   sort?: string
   dir?: string
 }): Promise<ListPoliciesResponse> {
   const qs = buildQuery({
     limit: params?.limit,
     offset: params?.offset,
+    q: params?.q,
+    policy_type: params?.policy_type,
+    action: params?.action,
+    is_enabled: params?.is_enabled,
+    risk_level: params?.risk_level,
+    category: params?.category,
     sort: params?.sort,
     dir: params?.dir,
   })
@@ -797,4 +809,55 @@ export function formatLocalDateTimeForFile(value?: string | null): string {
   const mi = String(d.getMinutes()).padStart(2, "0")
   const ss = String(d.getSeconds()).padStart(2, "0")
   return `${yyyy}${mm}${dd}_${hh}${mi}${ss}`
+}
+
+/* =========================
+Users 타입
+========================= */
+
+export type UserRole = "Admin" | "Operator" | "Engineer" | string
+
+export type UserItem = {
+  id: number
+  username: string
+  name: string
+  email: string
+  role: UserRole
+  is_active: number | boolean
+  is_2fa_enabled: number | boolean
+  created_at: string | null
+  last_login_at?: string | null
+}
+
+export type ListUsersResponse = {
+  items: UserItem[]
+  total: number
+  limit: number
+  offset: number
+  sort?: string
+  dir?: string
+}
+
+export async function apiListUsers(params?: {
+  limit?: number
+  offset?: number
+  q?: string
+  role?: string
+  is_active?: number
+  is_2fa_enabled?: number
+  sort?: string
+  dir?: string
+}): Promise<ListUsersResponse> {
+  const qs = buildQuery({
+    limit: params?.limit,
+    offset: params?.offset,
+    q: params?.q,
+    role: params?.role,
+    is_active: params?.is_active,
+    is_2fa_enabled: params?.is_2fa_enabled,
+    sort: params?.sort,
+    dir: params?.dir,
+  })
+
+  return await httpJson<ListUsersResponse>(`/v1/users${qs}`)
 }

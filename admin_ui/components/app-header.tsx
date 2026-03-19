@@ -31,7 +31,7 @@ export function AppHeader() {
       <DropdownMenu>
         <DropdownMenuTrigger className="flex items-center gap-2 rounded-md px-3 py-1.5 text-sm transition-colors hover:bg-muted outline-none">
           <div className="flex size-7 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs font-semibold">
-            {user.name.split(" ").map(n => n[0]).join("")}
+            {user.name.split(" ").map((n) => n[0]).join("")}
           </div>
           <span className="font-medium text-foreground">{user.name}</span>
           <Badge className={roleBadgeColors[user.role] + " text-[10px] px-1.5 py-0 border-0"}>
@@ -39,17 +39,22 @@ export function AppHeader() {
           </Badge>
           <ChevronDown className="size-3.5 text-muted-foreground" />
         </DropdownMenuTrigger>
+
         <DropdownMenuContent align="end" className="w-48">
           <DropdownMenuLabel className="font-normal">
             <div className="text-sm font-medium">{user.name}</div>
             <div className="text-xs text-muted-foreground">{user.email}</div>
           </DropdownMenuLabel>
+
           <DropdownMenuSeparator />
-          <DropdownMenuItem>
+
+          <DropdownMenuItem onClick={() => router.push("/users")}>
             <User className="mr-2 size-4" />
-            Profile
+            Profile & Users
           </DropdownMenuItem>
+
           <DropdownMenuSeparator />
+
           <DropdownMenuItem
             onClick={() => {
               logout()

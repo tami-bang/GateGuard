@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import { AppSidebar } from "@/components/app-sidebar"
 import { AppHeader } from "@/components/app-header"
+import { AppFooter } from "@/components/app-footer"
+import { PageHelpFab } from "@/components/page-help-fab"
 import { GateGuardSplash } from "@/components/gateguard-splash"
 import { useAuth } from "@/lib/auth-context"
 
@@ -57,8 +59,11 @@ export default function DashboardLayoutClient({ children }: { children: React.Re
         <div className="flex flex-1 flex-col pl-60 transition-all duration-200" id="main-content">
           <AppHeader />
           <main className="flex-1 p-6">{children}</main>
+          <AppFooter />
         </div>
       </div>
+
+      <PageHelpFab />
     </>
   )
 }
