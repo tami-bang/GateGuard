@@ -19,15 +19,32 @@ interface AuthContextType {
   refreshSession: () => Promise<User | null>
 }
 
-const allPages = ["dashboard", "logs", "incidents", "policies", "ai-analysis", "audit-log"]
+const allPages = ["dashboard", "logs", "incidents", "policies", "ai-analysis", "audit-log", "users"]
 
-const roleAccessMap: Record<UserRole, string[]> = {
+const roleAccessMap: Record<string, string[]> = {
+  ADMIN: allPages,
+  OPERATOR: ["dashboard", "logs", "incidents", "policies", "ai-analysis", "audit-log", "users"],
+  ENGINEER: ["dashboard", "logs", "incidents", "ai-analysis", "audit-log"],
+
   Admin: allPages,
-  Operator: ["dashboard", "logs", "incidents", "policies", "ai-analysis", "audit-log"],
+  Operator: ["dashboard", "logs", "incidents", "policies", "ai-analysis", "audit-log", "users"],
   Engineer: ["dashboard", "logs", "incidents", "ai-analysis", "audit-log"],
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined)
+
+function normalizeRole(role: string | null | undefined): string {
+  if (!role) return ""
+  const trimmed = String(role).trim()
+  if (!trimmed) return ""
+  const upper = trimmed.toUpperCase()
+
+  if (upper === "ADMIN") return "ADMIN"
+  if (upper === "OPERATOR") return "OPERATOR"
+  if (upper === "ENGINEER") return "ENGINEER"
+
+  return trimmed
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
@@ -97,19 +114,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  const login = useCallback(async (email: string, password: string) => {
-    const res = await fetch("/api/auth/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ email, password }),
-    })
+  const login = useCallback(
+    async (email: string, password: string) => {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ email, password }),
+      })
 
-    if (!res.ok) return false
+      if (!res.ok) return false
 
-    await refreshSession()
-    return true
-  }, [refreshSession])
+      await refreshSession()
+      return true
+    },
+    [refreshSession]
+  )
 
   const logout = useCallback(async () => {
     await fetch("/api/auth/logout", {
@@ -124,7 +144,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const hasAccess = useCallback(
     (page: string) => {
       if (!user) return false
-      return roleAccessMap[user.role].includes(page)
+
+      const normalizedRole = normalizeRole((user as any)?.role)
+      const allowedPages = roleAccessMap[normalizedRole] ?? []
+
+      return allowedPages.includes(page)
     },
     [user]
   )

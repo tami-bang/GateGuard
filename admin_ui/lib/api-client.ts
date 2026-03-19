@@ -3,7 +3,7 @@
 /*
 GateGuard API Client
 - 공통 타입
-- logs / incidents / policies API
+- logs / incidents / policies / users API
 - dashboard 확장 타입 포함
 */
 
@@ -598,7 +598,7 @@ export async function apiListIncidents(params?: {
   dir?: string
 }): Promise<IncidentListResponse> {
   const page = params?.page && params.page > 0 ? params.page : 1
-  const limit = params?.limit && params.limit > 0 ? params.limit : 20
+  const limit = params?.limit && params?.limit > 0 ? params.limit : 20
   const offset = (page - 1) * limit
 
   const qs = buildQuery({
@@ -813,20 +813,26 @@ export function formatLocalDateTimeForFile(value?: string | null): string {
 
 /* =========================
 Users 타입
+- 현재 백엔드 응답 기준 우선
+- 일부 필드는 향후 확장 대비 optional
 ========================= */
 
-export type UserRole = "Admin" | "Operator" | "Engineer" | string
+export type UserRole = "ADMIN" | "OPERATOR" | "ENGINEER" | string
 
 export type UserItem = {
-  id: number
-  username: string
+  // 현재 응답에서 실제 사용 가능한 핵심 필드
   name: string
   email: string
   role: UserRole
   is_active: number | boolean
-  is_2fa_enabled: number | boolean
   created_at: string | null
+
+  // 백엔드 확장 또는 기존 UI 호환 대비 optional
+  id?: number
+  username?: string | null
+  is_2fa_enabled?: number | boolean | null
   last_login_at?: string | null
+  updated_at?: string | null
 }
 
 export type ListUsersResponse = {
@@ -836,6 +842,50 @@ export type ListUsersResponse = {
   offset: number
   sort?: string
   dir?: string
+}
+
+export type GetUserResponse = {
+  user: UserItem
+}
+
+
+export type CreateUserRequest = {
+  username: string
+  name: string
+  email: string
+  role: string
+  password: string
+  is_active?: number
+  is_2fa_enabled?: number
+}
+
+export type CreateUserResponse = {
+  ok: boolean
+  user: UserItem
+}
+
+export type PatchUserRequest = {
+  username?: string
+  name?: string
+  email?: string
+  role?: string
+  password?: string
+  is_active?: number
+  is_2fa_enabled?: number
+}
+
+export type PatchUserResponse = {
+  ok: boolean
+  user: UserItem
+}
+
+export type ToggleUser2FARequest = {
+  enabled?: number
+}
+
+export type ToggleUser2FAResponse = {
+  ok: boolean
+  user: UserItem
 }
 
 export async function apiListUsers(params?: {
@@ -860,4 +910,32 @@ export async function apiListUsers(params?: {
   })
 
   return await httpJson<ListUsersResponse>(`/v1/users${qs}`)
+}
+
+export async function apiGetUser(userId: number): Promise<GetUserResponse> {
+  return await httpJson<GetUserResponse>(`/v1/users/${userId}`)
+}
+
+export async function apiCreateUser(req: CreateUserRequest): Promise<CreateUserResponse> {
+  return await httpJson<CreateUserResponse>(`/v1/users`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  })
+}
+
+export async function apiPatchUser(userId: number, req: PatchUserRequest): Promise<PatchUserResponse> {
+  return await httpJson<PatchUserResponse>(`/v1/users/${userId}`, {
+    method: "PATCH",
+    body: JSON.stringify(req),
+  })
+}
+
+export async function apiToggleUser2FA(
+  userId: number,
+  req?: ToggleUser2FARequest
+): Promise<ToggleUser2FAResponse> {
+  return await httpJson<ToggleUser2FAResponse>(`/v1/users/${userId}/toggle-2fa`, {
+    method: "POST",
+    body: JSON.stringify(req ?? {}),
+  })
 }

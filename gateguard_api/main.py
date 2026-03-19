@@ -2,15 +2,17 @@ import os
 import time
 import uuid
 import json
+import hashlib
 import subprocess
+import bcrypt
 from datetime import datetime, timedelta
-from typing import Optional, Any, List, Dict
+from typing import Optional, Any, List, Dict, Literal
 
 import pymysql
 from fastapi import FastAPI, Header, HTTPException, Query, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, EmailStr
 
 from gateguard_api.ai_loader import load_artifacts_on_startup, get_model_version
 from gateguard_api.ai_manager import score_url
@@ -35,6 +37,10 @@ def load_env(path: str) -> None:
             k, v = line.split("=", 1)
             os.environ.setdefault(k.strip(), v.strip())
 
+from gateguard_api.db import get_connection
+
+def get_db_connection():
+    return get_connection()
 
 # config.env 로드
 # 1) systemd EnvironmentFile(/etc/gateguard-fastapi.env)도 읽어준다 (있으면)
@@ -1175,99 +1181,514 @@ def _touch_policy_updated(cur, conn, policy_id: int, user_id: int) -> None:
 # =========================
 # User / Account API
 # =========================
+_USER_ROLE_ALLOWED = {"ADMIN", "OPERATOR", "ENGINEER"}
+_USER_PK = "user_id"
 
-@app.get("/v1/users")
-@app.get("/users")
+_TABLE_META_CACHE: Dict[str, Dict[str, dict]] = {}
+
+
+def _get_table_meta(conn, table: str) -> Dict[str, dict]:
+    key = table.lower()
+    if key in _TABLE_META_CACHE:
+        return _TABLE_META_CACHE[key]
+
+    with conn.cursor() as cur:
+        cur.execute(f"SHOW COLUMNS FROM {table}")
+        rows = cur.fetchall() or []
+
+    meta = {row["Field"]: row for row in rows}
+    _TABLE_META_CACHE[key] = meta
+    return meta
+
+
+def _normalize_user_role(role: Optional[str]) -> str:
+    value = (role or "").strip().upper()
+    if value not in _USER_ROLE_ALLOWED:
+        raise HTTPException(status_code=400, detail="invalid role (ADMIN/OPERATOR/ENGINEER)")
+    return value
+
+
+def _hash_user_password(raw_password: str) -> str:
+    password = (raw_password or "").strip()
+    if not password:
+        raise HTTPException(status_code=400, detail="password is required")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="password must be at least 8 characters")
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def _normalize_bool_flag(value, field_name: str) -> int:
+    if value in (True, 1, "1", "true", "TRUE", "y", "Y", "yes", "YES", "on", "ON"):
+        return 1
+    if value in (False, 0, "0", "false", "FALSE", "n", "N", "no", "NO", "off", "OFF", None):
+        return 0
+    raise HTTPException(status_code=400, detail=f"invalid boolean for {field_name}")
+
+
+def _require_actor_user_id(x_user_id: Optional[str]) -> int:
+    raw = (x_user_id or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="X-User-Id header is required")
+    try:
+        return int(raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid X-User-Id header")
+
+
+def _user_exists(conn, user_id: int) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT {_USER_PK} FROM user_account WHERE {_USER_PK} = %s LIMIT 1",
+            (user_id,),
+        )
+        return cur.fetchone() is not None
+
+
+def _serialize_user_row(row: dict) -> dict:
+    if not row:
+        return {}
+    return {
+        "user_id": row.get("user_id"),
+        "name": row.get("name"),
+        "email": row.get("email"),
+        "role": row.get("role"),
+        "is_active": int(row.get("is_active") or 0),
+        "is_2fa_enabled": int(row.get("two_factor_enabled") or 0),
+        "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
+        "updated_at": row.get("updated_at").isoformat() if row.get("updated_at") else None,
+    }
+
+
+class UserCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    email: EmailStr
+    role: str
+    password: str = Field(..., min_length=8, max_length=255)
+    is_active: Optional[int] = 1
+    is_2fa_enabled: Optional[int] = 0
+
+
+class UserUpdateRequest(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    email: Optional[EmailStr] = None
+    role: Optional[str] = None
+    password: Optional[str] = Field(None, min_length=8, max_length=255)
+    is_active: Optional[int] = None
+    is_2fa_enabled: Optional[int] = None
+
+
+class UserListResponse(BaseModel):
+    items: List[dict]
+    total: int
+    limit: int
+    offset: int
+    sort: str
+    dir: str
+
+
+@app.get("/v1/users", response_model=UserListResponse)
 def list_users(
-    limit: int = Query(50, ge=1, le=500),
+    limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
-    q: Optional[str] = None,
-    role: Optional[str] = None,
-    is_active: Optional[int] = None,
-    is_2fa_enabled: Optional[int] = None,
+    q: Optional[str] = Query(None),
+    role: Optional[str] = Query(None),
+    is_active: Optional[int] = Query(None),
     sort: str = Query("created_at"),
-    dir: str = Query("desc"),
+    dir: Literal["asc", "desc"] = Query("desc"),
 ):
-    with db_conn() as conn:
-        cols = _get_table_cols(conn, "user_account")
+    allowed_sort = {
+        "user_id": "user_id",
+        "name": "name",
+        "email": "email",
+        "role": "role",
+        "is_active": "is_active",
+        "created_at": "created_at",
+        "updated_at": "updated_at",
+    }
+    sort_col = allowed_sort.get((sort or "").strip().lower())
+    if not sort_col:
+        raise HTTPException(status_code=400, detail="invalid sort field")
 
-        where = []
-        params: List[Any] = []
+    where_parts = []
+    params = []
 
-        if q:
-            q_like = f"%{q}%"
-            q_parts = []
+    if q and q.strip():
+        like = f"%{q.strip()}%"
+        where_parts.append("(name LIKE %s OR email LIKE %s)")
+        params.extend([like, like])
 
-            if "username" in cols:
-                q_parts.append("username LIKE %s")
-                params.append(q_like)
+    if role and role.strip():
+        where_parts.append("role = %s")
+        params.append(_normalize_user_role(role))
 
-            if "name" in cols:
-                q_parts.append("name LIKE %s")
-                params.append(q_like)
+    if is_active is not None:
+        where_parts.append("is_active = %s")
+        params.append(_normalize_bool_flag(is_active, "is_active"))
 
-            if "email" in cols:
-                q_parts.append("email LIKE %s")
-                params.append(q_like)
+    where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
 
-            if q_parts:
-                where.append("(" + " OR ".join(q_parts) + ")")
-
-        if role and "role" in cols:
-            where.append("role = %s")
-            params.append(role)
-
-        if is_active is not None and "is_active" in cols:
-            where.append("is_active = %s")
-            params.append(int(is_active))
-
-        if is_2fa_enabled is not None and "is_2fa_enabled" in cols:
-            where.append("is_2fa_enabled = %s")
-            params.append(int(is_2fa_enabled))
-
-        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
-
-        allowed_sort = [c for c in ["created_at", "last_login_at", "id", "username", "name", "email", "role"] if c in cols]
-        if sort not in allowed_sort:
-            sort = "created_at" if "created_at" in cols else (allowed_sort[0] if allowed_sort else "id")
-
-        if (dir or "").lower() not in ("asc", "desc"):
-            dir = "desc"
-
-        order_sql = f"ORDER BY {sort} {dir.upper()}"
-
-        select_cols = []
-        for col in ["id", "username", "name", "email", "role", "is_active", "is_2fa_enabled", "created_at", "last_login_at"]:
-            if col in cols:
-                select_cols.append(col)
-
-        if not select_cols:
-            raise HTTPException(status_code=500, detail="user_account table columns not available")
-
-        count_sql = f"SELECT COUNT(*) AS cnt FROM user_account {where_sql}"
-        data_sql = f"""
-        SELECT {", ".join(select_cols)}
-        FROM user_account
-        {where_sql}
-        {order_sql}
-        LIMIT %s OFFSET %s
-        """
-
+    conn = get_db_connection()
+    try:
         with conn.cursor() as cur:
-            cur.execute(count_sql, params)
-            total = int(cur.fetchone()["cnt"])
+            cur.execute(
+                f"""
+                SELECT COUNT(*) AS cnt
+                FROM user_account
+                {where_sql}
+                """,
+                tuple(params),
+            )
+            total_row = cur.fetchone() or {}
+            total = int(total_row.get("cnt") or 0)
 
-            cur.execute(data_sql, params + [limit, offset])
+            cur.execute(
+                f"""
+                SELECT
+                    user_id,
+                    name,
+                    email,
+                    role,
+                    is_active,
+                    two_factor_enabled,
+                    created_at,
+                    updated_at
+                FROM user_account
+                {where_sql}
+                ORDER BY {sort_col} {dir.upper()}
+                LIMIT %s OFFSET %s
+                """,
+                tuple(params + [limit, offset]),
+            )
             rows = cur.fetchall() or []
 
-    return {
-        "items": rows,
-        "total": total,
-        "limit": limit,
-        "offset": offset,
-        "sort": sort,
-        "dir": dir,
-    }
+        return {
+            "items": [_serialize_user_row(row) for row in rows],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "sort": sort_col,
+            "dir": dir,
+        }
+    finally:
+        conn.close()
+
+
+@app.post("/v1/users")
+def create_user(
+    payload: UserCreateRequest,
+    x_user_id: Optional[str] = Header(None),
+):
+    actor_user_id = _require_actor_user_id(x_user_id)
+
+    conn = get_db_connection()
+    try:
+        if not _user_exists(conn, actor_user_id):
+            raise HTTPException(status_code=404, detail="actor user not found")
+
+        name = (payload.name or "").strip()
+        email = (str(payload.email) or "").strip().lower()
+        role = _normalize_user_role(payload.role)
+        password_hash = _hash_user_password(payload.password)
+        is_active = _normalize_bool_flag(payload.is_active, "is_active")
+        two_factor_enabled = _normalize_bool_flag(payload.is_2fa_enabled, "is_2fa_enabled")
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT user_id
+                FROM user_account
+                WHERE email = %s
+                LIMIT 1
+                """,
+                (email,),
+            )
+            exists_row = cur.fetchone()
+            if exists_row:
+                raise HTTPException(status_code=409, detail="email already exists")
+
+            cur.execute(
+                """
+                INSERT INTO user_account (
+                    email,
+                    password_hash,
+                    name,
+                    role,
+                    is_active,
+                    two_factor_enabled
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    email,
+                    password_hash,
+                    name,
+                    role,
+                    is_active,
+                    two_factor_enabled,
+                ),
+            )
+            new_user_id = cur.lastrowid
+
+            cur.execute(
+                """
+                SELECT
+                    user_id,
+                    name,
+                    email,
+                    role,
+                    is_active,
+                    two_factor_enabled,
+                    created_at,
+                    updated_at
+                FROM user_account
+                WHERE user_id = %s
+                LIMIT 1
+                """,
+                (new_user_id,),
+            )
+            row = cur.fetchone()
+
+        conn.commit()
+        return {
+            "ok": True,
+            "item": _serialize_user_row(row),
+        }
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"create user failed: {e}")
+    finally:
+        conn.close()
+
+
+@app.put("/v1/users/{user_id}")
+def update_user(
+    user_id: int,
+    payload: UserUpdateRequest,
+    x_user_id: Optional[str] = Header(None),
+):
+    actor_user_id = _require_actor_user_id(x_user_id)
+
+    conn = get_db_connection()
+    try:
+        if not _user_exists(conn, actor_user_id):
+            raise HTTPException(status_code=404, detail="actor user not found")
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    user_id,
+                    email,
+                    name,
+                    role,
+                    is_active,
+                    two_factor_enabled
+                FROM user_account
+                WHERE user_id = %s
+                LIMIT 1
+                """,
+                (user_id,),
+            )
+            existing = cur.fetchone()
+
+            if not existing:
+                raise HTTPException(status_code=404, detail="user not found")
+
+            updates = []
+            params = []
+
+            if payload.name is not None:
+                name = payload.name.strip()
+                if not name:
+                    raise HTTPException(status_code=400, detail="name is required")
+                updates.append("name = %s")
+                params.append(name)
+
+            if payload.email is not None:
+                email = str(payload.email).strip().lower()
+                cur.execute(
+                    """
+                    SELECT user_id
+                    FROM user_account
+                    WHERE email = %s AND user_id <> %s
+                    LIMIT 1
+                    """,
+                    (email, user_id),
+                )
+                dup = cur.fetchone()
+                if dup:
+                    raise HTTPException(status_code=409, detail="email already exists")
+                updates.append("email = %s")
+                params.append(email)
+
+            if payload.role is not None:
+                role = _normalize_user_role(payload.role)
+                updates.append("role = %s")
+                params.append(role)
+
+            if payload.password is not None:
+                password_hash = _hash_user_password(payload.password)
+                updates.append("password_hash = %s")
+                params.append(password_hash)
+
+            if payload.is_active is not None:
+                is_active = _normalize_bool_flag(payload.is_active, "is_active")
+                updates.append("is_active = %s")
+                params.append(is_active)
+
+            if payload.is_2fa_enabled is not None:
+                two_factor_enabled = _normalize_bool_flag(payload.is_2fa_enabled, "is_2fa_enabled")
+                updates.append("two_factor_enabled = %s")
+                params.append(two_factor_enabled)
+
+                if two_factor_enabled == 0:
+                    updates.append("two_factor_secret = NULL")
+                    updates.append("two_factor_verified_at = NULL")
+
+            if not updates:
+                cur.execute(
+                    """
+                    SELECT
+                        user_id,
+                        name,
+                        email,
+                        role,
+                        is_active,
+                        two_factor_enabled,
+                        created_at,
+                        updated_at
+                    FROM user_account
+                    WHERE user_id = %s
+                    LIMIT 1
+                    """,
+                    (user_id,),
+                )
+                row = cur.fetchone()
+                return {
+                    "ok": True,
+                    "item": _serialize_user_row(row),
+                }
+
+            params.append(user_id)
+            cur.execute(
+                f"""
+                UPDATE user_account
+                SET {", ".join(updates)}
+                WHERE user_id = %s
+                """,
+                tuple(params),
+            )
+
+            cur.execute(
+                """
+                SELECT
+                    user_id,
+                    name,
+                    email,
+                    role,
+                    is_active,
+                    two_factor_enabled,
+                    created_at,
+                    updated_at
+                FROM user_account
+                WHERE user_id = %s
+                LIMIT 1
+                """,
+                (user_id,),
+            )
+            row = cur.fetchone()
+
+        conn.commit()
+        return {
+            "ok": True,
+            "item": _serialize_user_row(row),
+        }
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"update user failed: {e}")
+    finally:
+        conn.close()
+
+
+@app.get("/v1/users/{user_id}")
+def get_user(user_id: int):
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    user_id,
+                    name,
+                    email,
+                    role,
+                    is_active,
+                    two_factor_enabled,
+                    created_at,
+                    updated_at
+                FROM user_account
+                WHERE user_id = %s
+                LIMIT 1
+                """,
+                (user_id,),
+            )
+            row = cur.fetchone()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="user not found")
+
+        return {
+            "item": _serialize_user_row(row),
+        }
+    finally:
+        conn.close()
+
+
+@app.delete("/v1/users/{user_id}")
+def delete_user(
+    user_id: int,
+    x_user_id: Optional[str] = Header(None),
+):
+    actor_user_id = _require_actor_user_id(x_user_id)
+
+    if actor_user_id == user_id:
+        raise HTTPException(status_code=400, detail="cannot delete self")
+
+    conn = get_db_connection()
+    try:
+        if not _user_exists(conn, actor_user_id):
+            raise HTTPException(status_code=404, detail="actor user not found")
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT user_id FROM user_account WHERE user_id = %s LIMIT 1",
+                (user_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="user not found")
+
+            cur.execute(
+                "DELETE FROM user_account WHERE user_id = %s",
+                (user_id,),
+            )
+
+        conn.commit()
+        return {"ok": True}
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"delete user failed: {e}")
+    finally:
+        conn.close()
+
 
 # =========================
 # Policy API (policy, policy_rule)
