@@ -9,6 +9,22 @@
 typedef _Bool my_bool;
 #endif
 
+static void db_log_conn_error(const char* where, MYSQL* conn)
+{
+    fprintf(stderr,
+            "[DB] %s failed: %s\n",
+            where ? where : "unknown",
+            conn ? mysql_error(conn) : "conn=NULL");
+}
+
+static void db_log_stmt_error(const char* where, MYSQL_STMT* stmt)
+{
+    fprintf(stderr,
+            "[DB] %s failed: %s\n",
+            where ? where : "unknown",
+            stmt ? mysql_stmt_error(stmt) : "stmt=NULL");
+}
+
 // Prepared Statement SQL을 준비하는 공통 함수
 static int stmt_prepare(MYSQL_STMT* stmt, const char* sql)
 {
@@ -31,7 +47,10 @@ long long insert_access_log(
     const char* url_norm)
 {
     // 필수값 확인
-    if (!conn || !request_id || !client_ip || !host) return -1;
+    if (!conn || !request_id || !client_ip || !host) {
+        fprintf(stderr, "[DB] insert_access_log invalid args\n");
+        return -1;
+    }
 
     const char* sql =
         "INSERT INTO access_log "
@@ -40,8 +59,13 @@ long long insert_access_log(
         "VALUES (?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, 'ERROR', 'SYSTEM', 'FAIL_STAGE')";
 
     MYSQL_STMT* stmt = mysql_stmt_init(conn);
-    if (!stmt) return -1;
+    if (!stmt) {
+        db_log_conn_error("mysql_stmt_init(access_log)", conn);
+        return -1;
+    }
+
     if (stmt_prepare(stmt, sql) != 0) {
+        db_log_stmt_error("mysql_stmt_prepare(access_log)", stmt);
         mysql_stmt_close(stmt);
         return -1;
     }
@@ -60,7 +84,7 @@ long long insert_access_log(
     unsigned long l1 = (unsigned long)strlen(client_ip);
     unsigned long l2 = sip ? (unsigned long)strlen(sip) : 0;
     unsigned long l3 = (unsigned long)strlen(host);
-    unsigned long l4 = p ? (unsigned long)strlen(p) : 0;
+    unsigned long l4 = (unsigned long)strlen(p);
     unsigned long l5 = m ? (unsigned long)strlen(m) : 0;
     unsigned long l6 = u ? (unsigned long)strlen(u) : 0;
 
@@ -127,17 +151,17 @@ long long insert_access_log(
     b[8].is_null = &is_null_url_norm;
 
     if (mysql_stmt_bind_param(stmt, b) != 0) {
+        db_log_stmt_error("mysql_stmt_bind_param(access_log)", stmt);
         mysql_stmt_close(stmt);
         return -1;
     }
 
-    // SQL 실행
     if (mysql_stmt_execute(stmt) != 0) {
+        db_log_stmt_error("mysql_stmt_execute(access_log)", stmt);
         mysql_stmt_close(stmt);
         return -1;
     }
 
-    // 생성된 log_id 반환
     long long log_id = (long long)mysql_insert_id(conn);
     mysql_stmt_close(stmt);
     return log_id;
@@ -153,7 +177,10 @@ void update_access_log_decision(
     long long policy_id,
     int engine_latency_ms)
 {
-    if (!conn || log_id <= 0 || !decision || !reason || !stage) return;
+    if (!conn || log_id <= 0 || !decision || !reason || !stage) {
+        fprintf(stderr, "[DB] update_access_log_decision invalid args\n");
+        return;
+    }
 
     const char* sql =
         "UPDATE access_log "
@@ -161,9 +188,13 @@ void update_access_log_decision(
         "WHERE log_id=?";
 
     MYSQL_STMT* stmt = mysql_stmt_init(conn);
-    if (!stmt) return;
+    if (!stmt) {
+        db_log_conn_error("mysql_stmt_init(update_access_log_decision)", conn);
+        return;
+    }
 
     if (stmt_prepare(stmt, sql) != 0) {
+        db_log_stmt_error("mysql_stmt_prepare(update_access_log_decision)", stmt);
         mysql_stmt_close(stmt);
         return;
     }
@@ -175,7 +206,6 @@ void update_access_log_decision(
     unsigned long l1 = (unsigned long)strlen(reason);
     unsigned long l2 = (unsigned long)strlen(stage);
 
-    // policy_id / latency NULL 여부
     my_bool is_null_policy = (policy_id == 0) ? 1 : 0;
     my_bool is_null_latency = (engine_latency_ms < 0) ? 1 : 0;
 
@@ -206,11 +236,17 @@ void update_access_log_decision(
     b[5].buffer = &log_id;
 
     if (mysql_stmt_bind_param(stmt, b) != 0) {
+        db_log_stmt_error("mysql_stmt_bind_param(update_access_log_decision)", stmt);
         mysql_stmt_close(stmt);
         return;
     }
 
-    mysql_stmt_execute(stmt);
+    if (mysql_stmt_execute(stmt) != 0) {
+        db_log_stmt_error("mysql_stmt_execute(update_access_log_decision)", stmt);
+        mysql_stmt_close(stmt);
+        return;
+    }
+
     mysql_stmt_close(stmt);
 }
 
@@ -224,7 +260,10 @@ void update_access_log_inject(
     int latency_ms,
     int status_code)
 {
-    if (!conn || log_id <= 0) return;
+    if (!conn || log_id <= 0) {
+        fprintf(stderr, "[DB] update_access_log_inject invalid args\n");
+        return;
+    }
 
     const char* sql =
         "UPDATE access_log SET "
@@ -233,9 +272,13 @@ void update_access_log_inject(
         "WHERE log_id=?";
 
     MYSQL_STMT* stmt = mysql_stmt_init(conn);
-    if (!stmt) return;
+    if (!stmt) {
+        db_log_conn_error("mysql_stmt_init(update_access_log_inject)", conn);
+        return;
+    }
 
     if (stmt_prepare(stmt, sql) != 0) {
+        db_log_stmt_error("mysql_stmt_prepare(update_access_log_inject)", stmt);
         mysql_stmt_close(stmt);
         return;
     }
@@ -243,7 +286,6 @@ void update_access_log_inject(
     MYSQL_BIND b[6];
     memset(b, 0, sizeof(b));
 
-    // send 성공 시 errno는 NULL 처리
     my_bool is_null_errno = (send_ok == 1) ? 1 : 0;
 
     b[0].buffer_type = MYSQL_TYPE_TINY;
@@ -266,27 +308,40 @@ void update_access_log_inject(
     b[5].buffer = &log_id;
 
     if (mysql_stmt_bind_param(stmt, b) != 0) {
+        db_log_stmt_error("mysql_stmt_bind_param(update_access_log_inject)", stmt);
         mysql_stmt_close(stmt);
         return;
     }
 
-    mysql_stmt_execute(stmt);
+    if (mysql_stmt_execute(stmt) != 0) {
+        db_log_stmt_error("mysql_stmt_execute(update_access_log_inject)", stmt);
+        mysql_stmt_close(stmt);
+        return;
+    }
+
     mysql_stmt_close(stmt);
 }
 
 // ai_analysis에서 다음 analysis_seq 값을 조회
 static int get_next_analysis_seq(MYSQL* conn, long long log_id, int* out_seq)
 {
-    if (!conn || log_id <= 0 || !out_seq) return -1;
+    if (!conn || log_id <= 0 || !out_seq) {
+        fprintf(stderr, "[DB] get_next_analysis_seq invalid args\n");
+        return -1;
+    }
 
     const char* sql =
         "SELECT COALESCE(MAX(analysis_seq), -1) + 1 "
         "FROM ai_analysis WHERE log_id=?";
 
     MYSQL_STMT* stmt = mysql_stmt_init(conn);
-    if (!stmt) return -1;
+    if (!stmt) {
+        db_log_conn_error("mysql_stmt_init(get_next_analysis_seq)", conn);
+        return -1;
+    }
 
     if (stmt_prepare(stmt, sql) != 0) {
+        db_log_stmt_error("mysql_stmt_prepare(get_next_analysis_seq)", stmt);
         mysql_stmt_close(stmt);
         return -1;
     }
@@ -298,11 +353,13 @@ static int get_next_analysis_seq(MYSQL* conn, long long log_id, int* out_seq)
     inb[0].buffer = &log_id;
 
     if (mysql_stmt_bind_param(stmt, inb) != 0) {
+        db_log_stmt_error("mysql_stmt_bind_param(get_next_analysis_seq)", stmt);
         mysql_stmt_close(stmt);
         return -1;
     }
 
     if (mysql_stmt_execute(stmt) != 0) {
+        db_log_stmt_error("mysql_stmt_execute(get_next_analysis_seq)", stmt);
         mysql_stmt_close(stmt);
         return -1;
     }
@@ -316,19 +373,28 @@ static int get_next_analysis_seq(MYSQL* conn, long long log_id, int* out_seq)
     outb[0].buffer = &seq;
 
     if (mysql_stmt_bind_result(stmt, outb) != 0) {
+        db_log_stmt_error("mysql_stmt_bind_result(get_next_analysis_seq)", stmt);
         mysql_stmt_close(stmt);
         return -1;
     }
 
-    if (mysql_stmt_fetch(stmt) != 0) {
-        mysql_stmt_close(stmt);
-        return -1;
+    {
+        int fetch_rc = mysql_stmt_fetch(stmt);
+        if (fetch_rc == 1) {
+            db_log_stmt_error("mysql_stmt_fetch(get_next_analysis_seq)", stmt);
+            mysql_stmt_close(stmt);
+            return -1;
+        }
+        if (fetch_rc == MYSQL_NO_DATA) {
+            fprintf(stderr, "[DB] mysql_stmt_fetch(get_next_analysis_seq) returned no data for log_id=%lld\n", log_id);
+            mysql_stmt_close(stmt);
+            return -1;
+        }
     }
 
     mysql_stmt_close(stmt);
 
     *out_seq = seq;
-
     return 0;
 }
 
@@ -340,13 +406,17 @@ int insert_ai_analysis_auto_seq(
     int ai_response,
     const char* error_code)
 {
-    if (!conn || log_id <= 0) return -1;
+    if (!conn || log_id <= 0) {
+        fprintf(stderr, "[DB] insert_ai_analysis_auto_seq invalid args\n");
+        return -1;
+    }
 
     int seq = 0;
 
-    // 다음 analysis_seq 값 조회
-    if (get_next_analysis_seq(conn, log_id, &seq) != 0)
+    if (get_next_analysis_seq(conn, log_id, &seq) != 0) {
+        fprintf(stderr, "[DB] get_next_analysis_seq failed for log_id=%lld\n", log_id);
         return -1;
+    }
 
     const char* sql =
         "INSERT INTO ai_analysis "
@@ -354,9 +424,13 @@ int insert_ai_analysis_auto_seq(
         "VALUES (?, NOW(), ?, ?, ?, ?, ?, ?, ?)";
 
     MYSQL_STMT* stmt = mysql_stmt_init(conn);
-    if (!stmt) return -1;
+    if (!stmt) {
+        db_log_conn_error("mysql_stmt_init(ai_analysis)", conn);
+        return -1;
+    }
 
     if (stmt_prepare(stmt, sql) != 0) {
+        db_log_stmt_error("mysql_stmt_prepare(ai_analysis)", stmt);
         mysql_stmt_close(stmt);
         return -1;
     }
@@ -366,7 +440,7 @@ int insert_ai_analysis_auto_seq(
 
     const char* label = (ar && ar->label[0]) ? ar->label : NULL;
     const char* mv = (ar && ar->model_version[0]) ? ar->model_version : "unknown";
-    const char* ec = error_code;
+    const char* ec = (error_code && error_code[0]) ? error_code : NULL;
 
     my_bool is_null_label = (label == NULL) ? 1 : 0;
     my_bool is_null_ec = (ec == NULL) ? 1 : 0;
@@ -411,17 +485,28 @@ int insert_ai_analysis_auto_seq(
     b[7].buffer = &seq;
 
     if (mysql_stmt_bind_param(stmt, b) != 0) {
+        db_log_stmt_error("mysql_stmt_bind_param(ai_analysis)", stmt);
         mysql_stmt_close(stmt);
         return -1;
     }
 
     if (mysql_stmt_execute(stmt) != 0) {
+        db_log_stmt_error("mysql_stmt_execute(ai_analysis)", stmt);
+        fprintf(stderr,
+                "[DB] ai_analysis insert context: log_id=%lld analysis_seq=%d ai_response=%d score=%.4f label=%s model_version=%s error_code=%s latency_ms=%d\n",
+                log_id,
+                seq,
+                ai_response,
+                score,
+                label ? label : "NULL",
+                mv ? mv : "NULL",
+                ec ? ec : "NULL",
+                latency);
         mysql_stmt_close(stmt);
         return -1;
     }
 
     mysql_stmt_close(stmt);
-
     return 0;
 }
 
@@ -462,13 +547,11 @@ int insert_review_event_if_needed(
     memset(note, 0, sizeof(note));
     memset(b, 0, sizeof(b));
 
-    // AI 단계에서 차단된 경우 정책 생성 제안
     if (decision_stage && strcmp(decision_stage, "AI_STAGE") == 0)
         snprintf(proposed_action, sizeof(proposed_action), "%s", "CREATE_POLICY");
     else
         snprintf(proposed_action, sizeof(proposed_action), "%s", "NO_ACTION");
 
-    // review_event 생성 사유 기록
     if (decision_stage && decision_stage[0] != '\0')
         snprintf(note, sizeof(note), "auto-created from BLOCK event (%s)", decision_stage);
     else

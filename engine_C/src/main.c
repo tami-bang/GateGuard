@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <stdint.h>
 #include <sys/time.h>
 #include <uuid/uuid.h>
 #include <mysql/mysql.h>
@@ -320,7 +321,15 @@ void engine_handle_http_event(const HttpEvent* ev) {
                           ev->method,
                           ev->url_norm);
 
-    if (log_id < 0) return;
+    if (log_id < 0) {
+        fprintf(stderr,
+                "[ACCESS_LOG] insert failed: request_id=%s client_ip=%s host=%s path=%s\n",
+                request_id,
+                ev->meta.client_ip ? ev->meta.client_ip : "NULL",
+                ev->host ? ev->host : "NULL",
+                ev->path ? ev->path : "NULL");
+        return;
+    }
 
     policy_decision_t d =
         match_policy(&g_cache,
@@ -362,6 +371,8 @@ void engine_handle_http_event(const HttpEvent* ev) {
     }
 
     ai_result_t ar;
+    memset(&ar, 0, sizeof(ar));
+
     int ok = ai_classify_url_ex(ev, request_id, &ar);
 
     if (ar.model_version[0] == '\0') {
@@ -371,12 +382,39 @@ void engine_handle_http_event(const HttpEvent* ev) {
 
     char err_code[32];
     const char* ec = NULL;
+
     if (!ok) {
         ai_error_to_code(&ar, err_code, sizeof(err_code));
         ec = err_code;
     }
 
-    (void)insert_ai_analysis_auto_seq(g_conn, log_id, &ar, ok ? 1 : 0, ec);
+    {
+        int ai_saved = insert_ai_analysis_auto_seq(g_conn, log_id, &ar, ok ? 1 : 0, ec);
+        if (ai_saved != 0) {
+            fprintf(stderr,
+                    "[AI_ANALYSIS] insert failed: log_id=%lld request_id=%s ok=%d host=%s path=%s score=%.4f label=%s model_version=%s error_code=%s\n",
+                    log_id,
+                    request_id,
+                    ok,
+                    ev->host ? ev->host : "NULL",
+                    ev->path ? ev->path : "NULL",
+                    ar.score,
+                    ar.label[0] ? ar.label : "NULL",
+                    ar.model_version[0] ? ar.model_version : "NULL",
+                    ec ? ec : "NULL");
+
+            update_access_log_decision(
+                g_conn,
+                log_id,
+                "REVIEW",
+                "SYSTEM",
+                "FAIL_STAGE",
+                0,
+                calc_engine_latency_ms(ev)
+            );
+            return;
+        }
+    }
 
     if (!ok)
     {
