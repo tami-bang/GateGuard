@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react"
 import Link from "next/link"
-import { useParams, useRouter } from "next/navigation"
+import { useParams, useRouter, useSearchParams } from "next/navigation"
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -10,7 +10,14 @@ import { Badge } from "@/components/ui/badge"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { StatusChip } from "@/components/status-chip"
-import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from "@/components/ui/breadcrumb"
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbLink,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "@/components/ui/breadcrumb"
 import { ArrowLeft, Edit, Trash2, Loader2, X } from "lucide-react"
 
 import {
@@ -64,12 +71,7 @@ function extractComparableFields(audit: PolicyAuditItem): Array<{ field: string;
   const beforePolicy = beforeObj?.policy ?? {}
   const afterPolicy = afterObj?.policy ?? {}
 
-  const keys = Array.from(
-    new Set([
-      ...Object.keys(beforePolicy || {}),
-      ...Object.keys(afterPolicy || {}),
-    ])
-  )
+  const keys = Array.from(new Set([...Object.keys(beforePolicy || {}), ...Object.keys(afterPolicy || {})]))
 
   return keys
     .sort((a, b) => a.localeCompare(b))
@@ -191,7 +193,18 @@ function AuditDetailModal({
 export default function PolicyDetailPage() {
   const params = useParams<{ id: string }>()
   const router = useRouter()
+  const searchParams = useSearchParams()
   const policyId = Number(params?.id)
+
+  const returnTo = searchParams.get("returnTo") || "/policies"
+  const returnToBase = useMemo(() => {
+    try {
+      const url = new URL(returnTo, "http://localhost")
+      return `${url.pathname}${url.search}`
+    } catch {
+      return "/policies"
+    }
+  }, [returnTo])
 
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
@@ -269,7 +282,7 @@ export default function PolicyDetailPage() {
       await apiDeletePolicy(policy.policy_id)
 
       window.alert("정책이 삭제되었습니다.")
-      router.push("/policies")
+      router.replace(returnToBase)
       router.refresh()
     } catch (e: any) {
       window.alert(e?.message ?? "정책 삭제에 실패했습니다.")
@@ -307,7 +320,7 @@ export default function PolicyDetailPage() {
       <div className="flex flex-col items-center justify-center gap-4 py-20">
         <p className="text-muted-foreground">{err ?? "Policy not found"}</p>
         <div className="flex gap-2">
-          <Link href="/policies">
+          <Link href={returnToBase} replace>
             <Button variant="outline" size="sm">Back to Policies</Button>
           </Link>
           <Button variant="outline" size="sm" onClick={() => router.refresh()}>Refresh</Button>
@@ -315,6 +328,8 @@ export default function PolicyDetailPage() {
       </div>
     )
   }
+
+  const editHref = `/policies/${policy.policy_id}/edit?returnTo=${encodeURIComponent(returnToBase)}`
 
   return (
     <div className="flex flex-col gap-4">
@@ -330,7 +345,7 @@ export default function PolicyDetailPage() {
 
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <Link href="/policies">
+          <Link href={returnToBase} replace>
             <Button variant="ghost" size="sm" className="h-8 px-2">
               <ArrowLeft className="size-4" />
             </Button>
@@ -350,7 +365,7 @@ export default function PolicyDetailPage() {
         </div>
 
         <div className="flex items-center gap-2">
-          <Link href={`/policies/${policy.policy_id}/edit`}>
+          <Link href={editHref}>
             <Button variant="outline" size="sm" className="h-8 gap-1.5 text-xs">
               <Edit className="size-3.5" /> Edit
             </Button>

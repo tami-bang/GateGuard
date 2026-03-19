@@ -1,11 +1,15 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import Link from "next/link"
 
-import { Card } from "@/components/ui/card"
+import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { Badge } from "@/components/ui/badge"
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -21,7 +25,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet"
-import { ExternalLink } from "lucide-react"
+import { ExternalLink, Filter, Search, X } from "lucide-react"
 
 import {
   apiListPolicyAudits,
@@ -29,11 +33,45 @@ import {
 } from "@/lib/api-client"
 
 const PAGE_SIZE = 10
+const CACHE_TTL_MS = 45_000
 
 const actionColors: Record<string, string> = {
   CREATE: "bg-emerald-50 text-emerald-700 border-emerald-200",
   UPDATE: "bg-blue-50 text-blue-700 border-blue-200",
   DELETE: "bg-red-50 text-red-700 border-red-200",
+  RULE_CREATE: "bg-cyan-50 text-cyan-700 border-cyan-200",
+  RULE_UPDATE: "bg-indigo-50 text-indigo-700 border-indigo-200",
+  RULE_DELETE: "bg-rose-50 text-rose-700 border-rose-200",
+}
+
+type FiltersState = {
+  action: string
+  policyId: string
+  reviewId: string
+}
+
+type AuditUrlState = {
+  filters: FiltersState
+  page: number
+}
+
+type SessionCacheEnvelope<T> = {
+  savedAt: number
+  data: T
+}
+
+type AuditCachePayload = {
+  response: {
+    items: PolicyAuditItem[]
+    total: number
+  }
+  requestKey: string
+}
+
+const INITIAL_FILTERS: FiltersState = {
+  action: "all",
+  policyId: "",
+  reviewId: "",
 }
 
 function fmt(ts: string | null | undefined): string {
@@ -99,42 +137,296 @@ function buildDiffRows(beforeObj: Record<string, any> | null, afterObj: Record<s
     })
 }
 
+function readSessionCache<T>(key: string): T | null {
+  if (typeof window === "undefined") return null
+
+  const raw = window.sessionStorage.getItem(key)
+  if (!raw) return null
+
+  try {
+    const parsed = JSON.parse(raw) as SessionCacheEnvelope<T>
+    if (!parsed || typeof parsed !== "object") {
+      window.sessionStorage.removeItem(key)
+      return null
+    }
+
+    if (typeof parsed.savedAt !== "number" || Date.now() - parsed.savedAt > CACHE_TTL_MS) {
+      window.sessionStorage.removeItem(key)
+      return null
+    }
+
+    return parsed.data ?? null
+  } catch {
+    window.sessionStorage.removeItem(key)
+    return null
+  }
+}
+
+function writeSessionCache<T>(key: string, data: T) {
+  if (typeof window === "undefined") return
+
+  const payload: SessionCacheEnvelope<T> = {
+    savedAt: Date.now(),
+    data,
+  }
+
+  window.sessionStorage.setItem(key, JSON.stringify(payload))
+}
+
+function normalizePage(value: string | null): number {
+  if (!value) return 1
+  const n = Number(value)
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1
+}
+
+function normalizeAction(value: string | null): string {
+  if (!value) return "all"
+  return ["CREATE", "UPDATE", "DELETE", "RULE_CREATE", "RULE_UPDATE", "RULE_DELETE"].includes(value) ? value : "all"
+}
+
+function normalizeText(value: string | null): string {
+  return value?.trim() ?? ""
+}
+
+function toNumberOrUndefined(value: string): number | undefined {
+  const s = value.trim()
+  if (!s) return undefined
+  const n = Number(s)
+  return Number.isFinite(n) ? n : undefined
+}
+
+function isSameFilters(a: FiltersState, b: FiltersState): boolean {
+  return (
+    a.action === b.action &&
+    a.policyId === b.policyId &&
+    a.reviewId === b.reviewId
+  )
+}
+
+function buildAuditQuery(params: AuditUrlState): string {
+  const qs = new URLSearchParams()
+
+  if (params.filters.action !== "all") qs.set("action", params.filters.action)
+  if (params.filters.policyId.trim()) qs.set("policy_id", params.filters.policyId.trim())
+  if (params.filters.reviewId.trim()) qs.set("source_review_id", params.filters.reviewId.trim())
+  if (params.page > 1) qs.set("page", String(params.page))
+
+  return qs.toString()
+}
+
+function useDebounced<T>(value: T, delayMs: number): T {
+  const [v, setV] = useState(value)
+
+  useEffect(() => {
+    const t = setTimeout(() => setV(value), delayMs)
+    return () => clearTimeout(t)
+  }, [value, delayMs])
+
+  return v
+}
+
 export default function AuditLogPage() {
+  return (
+    <Suspense fallback={<AuditLogPageSkeleton />}>
+      <AuditLogPageInner />
+    </Suspense>
+  )
+}
+
+function AuditLogPageSkeleton() {
+  return (
+    <div className="flex flex-col gap-4">
+      <Breadcrumb>
+        <BreadcrumbList>
+          <BreadcrumbItem>
+            <BreadcrumbLink href="/dashboard">Dashboard</BreadcrumbLink>
+          </BreadcrumbItem>
+          <BreadcrumbSeparator />
+          <BreadcrumbItem>
+            <BreadcrumbPage>Audit Log</BreadcrumbPage>
+          </BreadcrumbItem>
+        </BreadcrumbList>
+      </Breadcrumb>
+
+      <div>
+        <h1 className="text-xl font-semibold text-foreground">Audit Log</h1>
+        <p className="text-sm text-muted-foreground">Loading...</p>
+      </div>
+
+      <Card className="border shadow-sm">
+        <CardContent className="p-6 text-sm text-muted-foreground">Fetching audit logs...</CardContent>
+      </Card>
+    </div>
+  )
+}
+
+function AuditLogPageInner() {
+  const router = useRouter()
+  const pathname = usePathname()
+  const searchParams = useSearchParams()
+
+  const [filters, setFilters] = useState<FiltersState>(INITIAL_FILTERS)
   const [page, setPage] = useState(1)
 
   const [items, setItems] = useState<PolicyAuditItem[]>([])
   const [total, setTotal] = useState(0)
 
-  const [loading, setLoading] = useState(true)
+  const [initialLoading, setInitialLoading] = useState(true)
+  const [tableLoading, setTableLoading] = useState(false)
   const [error, setError] = useState("")
   const [selectedAudit, setSelectedAudit] = useState<PolicyAuditItem | null>(null)
+
+  const didHydrateFromUrl = useRef(false)
+  const didInitialLoad = useRef(false)
+  const restoredRequestKeyRef = useRef("")
+  const lastFetchedRequestKeyRef = useRef("")
+  const lastUrlSnapshotRef = useRef("")
+
+  useEffect(() => {
+    const nextFilters: FiltersState = {
+      action: normalizeAction(searchParams.get("action")),
+      policyId: normalizeText(searchParams.get("policy_id")),
+      reviewId: normalizeText(searchParams.get("source_review_id")),
+    }
+
+    const nextPage = normalizePage(searchParams.get("page"))
+
+    const snapshot = JSON.stringify({
+      filters: nextFilters,
+      page: nextPage,
+    })
+
+    if (lastUrlSnapshotRef.current === snapshot) {
+      didHydrateFromUrl.current = true
+      return
+    }
+
+    lastUrlSnapshotRef.current = snapshot
+
+    setFilters((prev) => (isSameFilters(prev, nextFilters) ? prev : nextFilters))
+    setPage((prev) => (prev === nextPage ? prev : nextPage))
+    didHydrateFromUrl.current = true
+  }, [searchParams])
+
+  const policyIdDebounced = useDebounced(filters.policyId.trim(), 300)
+  const reviewIdDebounced = useDebounced(filters.reviewId.trim(), 300)
+
+  const listQueryString = useMemo(() => {
+    return buildAuditQuery({
+      filters,
+      page,
+    })
+  }, [filters, page])
+
+  const currentListHref = useMemo(() => {
+    return listQueryString ? `${pathname}?${listQueryString}` : pathname
+  }, [pathname, listQueryString])
+
+  const cacheKey = useMemo(() => `gateguard:audit-log:${currentListHref}`, [currentListHref])
+
+  const syncUrl = useCallback(
+    (nextState: AuditUrlState) => {
+      const nextQuery = buildAuditQuery(nextState)
+      const nextHref = nextQuery ? `${pathname}?${nextQuery}` : pathname
+      const currentQuery = searchParams.toString()
+      const currentHref = currentQuery ? `${pathname}?${currentQuery}` : pathname
+
+      if (nextHref === currentHref) return
+      router.replace(nextHref, { scroll: false })
+    },
+    [pathname, router, searchParams]
+  )
+
+  useEffect(() => {
+    const cached = readSessionCache<AuditCachePayload>(cacheKey)
+
+    if (!cached?.response) {
+      restoredRequestKeyRef.current = ""
+      return
+    }
+
+    setItems(Array.isArray(cached.response.items) ? cached.response.items : [])
+    setTotal(typeof cached.response.total === "number" ? cached.response.total : 0)
+    setInitialLoading(false)
+    setTableLoading(false)
+    setError("")
+    didInitialLoad.current = true
+    restoredRequestKeyRef.current = cached.requestKey || ""
+    lastFetchedRequestKeyRef.current = cached.requestKey || ""
+  }, [cacheKey])
+
+  const debounceSettled =
+    policyIdDebounced === filters.policyId.trim() &&
+    reviewIdDebounced === filters.reviewId.trim()
+
+  const offset = (page - 1) * PAGE_SIZE
+
+  const apiParams = useMemo(() => {
+    return {
+      limit: PAGE_SIZE,
+      offset,
+      policy_id: toNumberOrUndefined(policyIdDebounced),
+      action: filters.action !== "all" ? filters.action : undefined,
+      source_review_id: toNumberOrUndefined(reviewIdDebounced),
+      sort: "changed_at",
+      dir: "desc",
+    }
+  }, [offset, filters.action, policyIdDebounced, reviewIdDebounced])
+
+  const requestKey = useMemo(() => JSON.stringify(apiParams), [apiParams])
 
   useEffect(() => {
     let alive = true
 
     async function load() {
+      if (!didHydrateFromUrl.current) return
+      if (!debounceSettled) return
+
+      if (restoredRequestKeyRef.current && restoredRequestKeyRef.current === requestKey) {
+        restoredRequestKeyRef.current = ""
+        lastFetchedRequestKeyRef.current = requestKey
+        return
+      }
+
+      if (lastFetchedRequestKeyRef.current === requestKey) {
+        return
+      }
+
       try {
-        setLoading(true)
+        if (didInitialLoad.current) {
+          setTableLoading(true)
+        } else {
+          setInitialLoading(true)
+        }
+
         setError("")
 
-        const offset = (page - 1) * PAGE_SIZE
-
-        const res = await apiListPolicyAudits({
-          limit: PAGE_SIZE,
-          offset,
-          sort: "changed_at",
-          dir: "desc",
-        })
+        const res = await apiListPolicyAudits(apiParams)
 
         if (!alive) return
-        setItems(res.items ?? [])
-        setTotal(res.total ?? 0)
+
+        const nextItems = res.items ?? []
+        const nextTotal = res.total ?? 0
+
+        setItems(nextItems)
+        setTotal(nextTotal)
+        didInitialLoad.current = true
+        lastFetchedRequestKeyRef.current = requestKey
+
+        writeSessionCache<AuditCachePayload>(cacheKey, {
+          response: {
+            items: nextItems,
+            total: nextTotal,
+          },
+          requestKey,
+        })
       } catch (e: any) {
         if (!alive) return
         setError(e?.message ?? "Failed to load audit logs")
       } finally {
         if (!alive) return
-        setLoading(false)
+        setInitialLoading(false)
+        setTableLoading(false)
       }
     }
 
@@ -143,7 +435,7 @@ export default function AuditLogPage() {
     return () => {
       alive = false
     }
-  }, [page])
+  }, [apiParams, cacheKey, debounceSettled, requestKey])
 
   const selectedBefore = useMemo(
     () => parseSnapshot(selectedAudit?.before_snapshot),
@@ -164,6 +456,36 @@ export default function AuditLogPage() {
   const pageStart = total === 0 ? 0 : (page - 1) * PAGE_SIZE + 1
   const pageEnd = Math.min(page * PAGE_SIZE, total)
 
+  const activeFilterCount =
+    (filters.action !== "all" ? 1 : 0) +
+    (filters.policyId.trim() ? 1 : 0) +
+    (filters.reviewId.trim() ? 1 : 0)
+
+  function commitState(nextState: AuditUrlState) {
+    setFilters(nextState.filters)
+    setPage(nextState.page)
+    syncUrl(nextState)
+  }
+
+  function updateFilter<K extends keyof FiltersState>(key: K, value: FiltersState[K]) {
+    const nextFilters = {
+      ...filters,
+      [key]: value,
+    }
+
+    commitState({
+      filters: nextFilters,
+      page: 1,
+    })
+  }
+
+  function clearFilters() {
+    commitState({
+      filters: INITIAL_FILTERS,
+      page: 1,
+    })
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <Breadcrumb>
@@ -178,11 +500,24 @@ export default function AuditLogPage() {
         </BreadcrumbList>
       </Breadcrumb>
 
-      <div>
-        <h1 className="text-xl font-semibold text-foreground">Audit Log</h1>
-        <p className="text-sm text-muted-foreground">
-          {loading ? "Loading policy audit history..." : `${total.toLocaleString()} total audit records`}
-        </p>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold text-foreground">Audit Log</h1>
+          <p className="text-sm text-muted-foreground">
+            {initialLoading ? "Loading policy audit history..." : `${total.toLocaleString()} total audit records`}
+          </p>
+        </div>
+
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-8 text-xs"
+          onClick={clearFilters}
+          disabled={activeFilterCount === 0 && page === 1}
+        >
+          <X className="mr-1 size-3.5" />
+          Reset
+        </Button>
       </div>
 
       {error ? (
@@ -191,96 +526,180 @@ export default function AuditLogPage() {
         </div>
       ) : null}
 
+      <Card className="border shadow-sm">
+        <CardContent className="flex flex-wrap items-end gap-3 p-3">
+          <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+            <Filter className="size-3.5" />
+            Filters
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+              Action
+            </label>
+            <Select value={filters.action} onValueChange={(v) => updateFilter("action", v)}>
+              <SelectTrigger className="h-8 w-[150px] text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All</SelectItem>
+                <SelectItem value="CREATE">Create</SelectItem>
+                <SelectItem value="UPDATE">Update</SelectItem>
+                <SelectItem value="DELETE">Delete</SelectItem>
+                <SelectItem value="RULE_CREATE">Rule Create</SelectItem>
+                <SelectItem value="RULE_UPDATE">Rule Update</SelectItem>
+                <SelectItem value="RULE_DELETE">Rule Delete</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+              Policy ID
+            </label>
+            <div className="relative">
+              <Search className="absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                type="number"
+                placeholder="Policy ID"
+                value={filters.policyId}
+                onChange={(e) => updateFilter("policyId", e.target.value)}
+                className="h-8 w-[150px] pl-7 text-xs"
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+              Source Review ID
+            </label>
+            <div className="relative">
+              <Search className="absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                type="number"
+                placeholder="Incident ID"
+                value={filters.reviewId}
+                onChange={(e) => updateFilter("reviewId", e.target.value)}
+                className="h-8 w-[170px] pl-7 text-xs"
+              />
+            </div>
+          </div>
+
+          <div className="ml-auto text-xs text-muted-foreground">
+            {activeFilterCount > 0 ? `${activeFilterCount} filter(s)` : "No filters"}
+          </div>
+        </CardContent>
+      </Card>
+
       <Card className="border shadow-sm overflow-hidden">
-        <Table>
-          <TableHeader>
-            <TableRow className="bg-muted/50">
-              <TableHead className="text-[11px]">Changed At</TableHead>
-              <TableHead className="text-[11px]">Action</TableHead>
-              <TableHead className="text-[11px]">Policy</TableHead>
-              <TableHead className="text-[11px]">Changed By</TableHead>
-              <TableHead className="text-[11px]">Source Review</TableHead>
-              <TableHead className="text-[11px]">Note</TableHead>
-              <TableHead className="text-[11px]">Detail</TableHead>
-            </TableRow>
-          </TableHeader>
+        <div className="relative">
+          {tableLoading && (
+            <>
+              <div className="absolute left-0 right-0 top-0 z-10 h-1 overflow-hidden bg-slate-100">
+                <div className="h-full w-1/3 animate-pulse rounded-full bg-blue-500" />
+              </div>
+              <div className="pointer-events-none absolute inset-0 z-10 bg-white/40" />
+            </>
+          )}
 
-          <TableBody>
-            {loading ? (
-              <TableRow>
-                <TableCell colSpan={7} className="py-8 text-center text-sm text-muted-foreground">
-                  Loading audit logs...
-                </TableCell>
+          <Table>
+            <TableHeader>
+              <TableRow className="bg-muted/50">
+                <TableHead className="text-[11px]">Changed At</TableHead>
+                <TableHead className="text-[11px]">Action</TableHead>
+                <TableHead className="text-[11px]">Policy</TableHead>
+                <TableHead className="text-[11px]">Changed By</TableHead>
+                <TableHead className="text-[11px]">Source Review</TableHead>
+                <TableHead className="text-[11px]">Note</TableHead>
+                <TableHead className="text-[11px]">Detail</TableHead>
               </TableRow>
-            ) : items.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={7} className="py-8 text-center text-sm text-muted-foreground">
-                  No audit records found
-                </TableCell>
-              </TableRow>
-            ) : (
-              items.map((audit) => (
-                <TableRow key={audit.audit_id} className="text-xs">
-                  <TableCell className="font-mono text-[11px] text-muted-foreground">
-                    {fmt(audit.changed_at)}
-                  </TableCell>
+            </TableHeader>
 
-                  <TableCell>
-                    <span
-                      className={`inline-flex rounded border px-1.5 py-0.5 text-[11px] font-semibold ${
-                        actionColors[audit.action] || ""
-                      }`}
-                    >
-                      {audit.action}
-                    </span>
-                  </TableCell>
-
-                  <TableCell>
-                    <Link
-                      href={`/policies/${audit.policy_id}`}
-                      className="text-primary hover:underline font-mono text-[11px] inline-flex items-center gap-1"
-                    >
-                      {audit.policy_name ?? `Policy #${audit.policy_id}`}
-                      <ExternalLink className="size-3" />
-                    </Link>
-                  </TableCell>
-
-                  <TableCell className="text-[11px] text-foreground">
-                    {audit.changed_by ?? "—"}
-                  </TableCell>
-
-                  <TableCell>
-                    {audit.source_review_id ? (
-                      <Link
-                        href={`/incidents/${audit.source_review_id}`}
-                        className="text-primary hover:underline font-mono text-[11px]"
-                      >
-                        {audit.source_review_id}
-                      </Link>
-                    ) : (
-                      <span className="text-muted-foreground">—</span>
-                    )}
-                  </TableCell>
-
-                  <TableCell className="max-w-[250px] truncate text-[11px] text-muted-foreground">
-                    {audit.change_note ?? "—"}
-                  </TableCell>
-
-                  <TableCell>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-6 px-2 text-xs text-primary"
-                      onClick={() => setSelectedAudit(audit)}
-                    >
-                      View Diff
-                    </Button>
+            <TableBody>
+              {initialLoading ? (
+                <TableRow>
+                  <TableCell colSpan={7} className="py-8 text-center text-sm text-muted-foreground">
+                    Loading audit logs...
                   </TableCell>
                 </TableRow>
-              ))
-            )}
-          </TableBody>
-        </Table>
+              ) : items.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={7} className="py-8 text-center text-sm text-muted-foreground">
+                    No audit records found
+                  </TableCell>
+                </TableRow>
+              ) : (
+                items.map((audit) => {
+                  const policyHref = `/policies/${audit.policy_id}?returnTo=${encodeURIComponent(currentListHref)}`
+                  const incidentHref = audit.source_review_id
+                    ? `/incidents/${audit.source_review_id}?returnTo=${encodeURIComponent(currentListHref)}`
+                    : ""
+
+                  return (
+                    <TableRow key={audit.audit_id} className="text-xs">
+                      <TableCell className="font-mono text-[11px] text-muted-foreground">
+                        {fmt(audit.changed_at)}
+                      </TableCell>
+
+                      <TableCell>
+                        <Badge
+                          variant="outline"
+                          className={`text-[11px] font-semibold ${
+                            actionColors[audit.action] || "bg-muted text-foreground border-border"
+                          }`}
+                        >
+                          {audit.action}
+                        </Badge>
+                      </TableCell>
+
+                      <TableCell>
+                        <Link
+                          href={policyHref}
+                          className="text-primary hover:underline font-mono text-[11px] inline-flex items-center gap-1"
+                        >
+                          {audit.policy_name ?? `Policy #${audit.policy_id}`}
+                          <ExternalLink className="size-3" />
+                        </Link>
+                      </TableCell>
+
+                      <TableCell className="text-[11px] text-foreground">
+                        {audit.changed_by ?? "—"}
+                      </TableCell>
+
+                      <TableCell>
+                        {audit.source_review_id ? (
+                          <Link
+                            href={incidentHref}
+                            className="text-primary hover:underline font-mono text-[11px]"
+                          >
+                            {audit.source_review_id}
+                          </Link>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </TableCell>
+
+                      <TableCell className="max-w-[250px] truncate text-[11px] text-muted-foreground">
+                        {audit.change_note ?? "—"}
+                      </TableCell>
+
+                      <TableCell>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 px-2 text-xs text-primary"
+                          onClick={() => setSelectedAudit(audit)}
+                        >
+                          View Diff
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  )
+                })
+              )}
+            </TableBody>
+          </Table>
+        </div>
 
         <div className="flex items-center justify-between border-t bg-white px-4 py-3">
           <div className="text-xs text-muted-foreground">
@@ -293,8 +712,13 @@ export default function AuditLogPage() {
             <Button
               variant="outline"
               size="sm"
-              disabled={page <= 1 || loading}
-              onClick={() => setPage((prev) => Math.max(1, prev - 1))}
+              disabled={page <= 1 || tableLoading}
+              onClick={() =>
+                commitState({
+                  filters,
+                  page: Math.max(1, page - 1),
+                })
+              }
             >
               Previous
             </Button>
@@ -306,8 +730,13 @@ export default function AuditLogPage() {
             <Button
               variant="outline"
               size="sm"
-              disabled={page >= totalPages || loading}
-              onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}
+              disabled={page >= totalPages || tableLoading}
+              onClick={() =>
+                commitState({
+                  filters,
+                  page: Math.min(totalPages, page + 1),
+                })
+              }
             >
               Next
             </Button>
@@ -332,7 +761,7 @@ export default function AuditLogPage() {
                 <div className="flex items-center gap-2">
                   <span
                     className={`inline-flex rounded border px-1.5 py-0.5 text-[11px] font-semibold ${
-                      actionColors[selectedAudit.action] || ""
+                      actionColors[selectedAudit.action] || "bg-muted text-foreground border-border"
                     }`}
                   >
                     {selectedAudit.action}
@@ -416,7 +845,7 @@ export default function AuditLogPage() {
                     Source Incident
                   </p>
                   <Link
-                    href={`/incidents/${selectedAudit.source_review_id}`}
+                    href={`/incidents/${selectedAudit.source_review_id}?returnTo=${encodeURIComponent(currentListHref)}`}
                     className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
                   >
                     {selectedAudit.source_review_id}
