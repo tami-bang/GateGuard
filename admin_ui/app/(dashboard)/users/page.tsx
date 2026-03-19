@@ -70,7 +70,6 @@ type UsersCachePayload = {
 type UserFormMode = "create" | "edit"
 
 type UserFormState = {
-  username: string
   name: string
   email: string
   role: string
@@ -86,7 +85,6 @@ const INITIAL_FILTERS: FiltersState = {
 }
 
 const INITIAL_FORM: UserFormState = {
-  username: "",
   name: "",
   email: "",
   role: "OPERATOR",
@@ -197,26 +195,29 @@ function formatDateTime(v: string | null | undefined): string {
   })
 }
 
+function getResolvedUserId(user: UserItem): number | null {
+  if (typeof user.user_id === "number") return user.user_id
+  if (typeof user.id === "number") return user.id
+  return null
+}
+
 function getUserRowKey(user: UserItem, index: number): string {
-  return String(user.id ?? user.email ?? user.username ?? `row-${index}`)
+  const resolvedId = getResolvedUserId(user)
+  return String(resolvedId ?? user.email ?? `row-${index}`)
 }
 
 function getDisplayName(user: UserItem): string {
   return user.name?.trim() || "—"
 }
 
-function getDisplayUsername(user: UserItem): string {
-  return user.username?.trim() || "—"
-}
-
 function getDisplayId(user: UserItem): string {
-  if (user.id === null || user.id === undefined) return "—"
-  return String(user.id)
+  const resolvedId = getResolvedUserId(user)
+  if (resolvedId === null) return "—"
+  return String(resolvedId)
 }
 
 function buildFormFromUser(user: UserItem): UserFormState {
   return {
-    username: user.username?.trim() || "",
     name: user.name?.trim() || "",
     email: user.email?.trim() || "",
     role: user.role?.trim() || "OPERATOR",
@@ -521,16 +522,10 @@ function UsersPageInner() {
   async function handleSubmitUser() {
     setFormError(null)
 
-    const username = form.username.trim()
     const name = form.name.trim()
     const email = form.email.trim()
     const role = form.role.trim().toUpperCase()
     const password = form.password
-
-    if (!username) {
-      setFormError("Username is required")
-      return
-    }
 
     if (!name) {
       setFormError("Name is required")
@@ -557,24 +552,23 @@ function UsersPageInner() {
 
       if (formMode === "create") {
         const payload: CreateUserRequest = {
-          username,
           name,
           email,
           role,
           password,
           is_active: form.is_active === "true" ? 1 : 0,
-          is_2fa_enabled: 0,
         }
 
         await apiCreateUser(payload)
       } else {
-        if (!editingUser?.id) {
+        const editingUserId = editingUser ? getResolvedUserId(editingUser) : null
+
+        if (!editingUserId) {
           setFormError("Editable user id not found")
           return
         }
 
         const payload: PatchUserRequest = {
-          username,
           name,
           email,
           role,
@@ -585,7 +579,7 @@ function UsersPageInner() {
           payload.password = password
         }
 
-        await apiPatchUser(editingUser.id, payload)
+        await apiPatchUser(editingUserId, payload)
       }
 
       setDialogOpen(false)
@@ -598,23 +592,27 @@ function UsersPageInner() {
   }
 
   async function handleToggle2FA(user: UserItem) {
-    if (!user.id) {
+    const userId = getResolvedUserId(user)
+
+    if (!userId) {
       alert("User id not found")
       return
     }
 
     const nextEnabled = toBool(user.is_2fa_enabled) ? 0 : 1
+    const targetLabel = user.email || user.name || `user:${userId}`
+
     const ok = window.confirm(
       nextEnabled === 1
-        ? `Enable 2FA for ${user.username || user.email || user.name}?`
-        : `Disable 2FA for ${user.username || user.email || user.name}?`
+        ? `Enable 2FA for ${targetLabel}?`
+        : `Disable 2FA for ${targetLabel}?`
     )
 
     if (!ok) return
 
     try {
-      setActionUserId(user.id)
-      await apiToggleUser2FA(user.id, { enabled: nextEnabled })
+      setActionUserId(userId)
+      await apiToggleUser2FA(userId, { enabled: nextEnabled })
       invalidateCurrentListCache()
     } catch (err) {
       alert(err instanceof Error ? err.message : "Failed to toggle 2FA")
@@ -679,7 +677,7 @@ function UsersPageInner() {
             <div className="relative">
               <Search className="absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
               <Input
-                placeholder="Name / username / email"
+                placeholder="Name / email"
                 value={filters.q}
                 onChange={(e) => updateFilter("q", e.target.value)}
                 className="h-8 w-[220px] pl-7 text-xs"
@@ -758,7 +756,6 @@ function UsersPageInner() {
               <TableRow className="bg-muted/50">
                 <TableHead className="text-[11px]">ID</TableHead>
                 <TableHead className="text-[11px]">Name</TableHead>
-                <TableHead className="text-[11px]">Username</TableHead>
                 <TableHead className="text-[11px]">Email</TableHead>
                 <TableHead className="text-[11px]">Role</TableHead>
                 <TableHead className="text-[11px]">Status</TableHead>
@@ -772,90 +769,95 @@ function UsersPageInner() {
             <TableBody>
               {initialLoading ? (
                 <TableRow>
-                  <TableCell colSpan={10} className="py-8 text-center text-sm text-muted-foreground">
+                  <TableCell colSpan={9} className="py-8 text-center text-sm text-muted-foreground">
                     Loading users...
                   </TableCell>
                 </TableRow>
               ) : items.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={10} className="py-8 text-center text-sm text-muted-foreground">
+                  <TableCell colSpan={9} className="py-8 text-center text-sm text-muted-foreground">
                     No users found
                   </TableCell>
                 </TableRow>
               ) : (
-                items.map((user, index) => (
-                  <TableRow key={getUserRowKey(user, index)} className="text-xs">
-                    <TableCell className="font-mono text-[11px] text-muted-foreground">
-                      {getDisplayId(user)}
-                    </TableCell>
-                    <TableCell className="font-medium text-foreground">{getDisplayName(user)}</TableCell>
-                    <TableCell className="font-mono text-[11px]">{getDisplayUsername(user)}</TableCell>
-                    <TableCell className="text-[11px]">{user.email ?? "—"}</TableCell>
-                    <TableCell>
-                      <Badge variant="outline" className="text-[10px]">
-                        {user.role ?? "—"}
-                      </Badge>
-                    </TableCell>
-                    <TableCell>
-                      <Badge
-                        variant={toBool(user.is_active) ? "default" : "secondary"}
-                        className={`text-[10px] ${toBool(user.is_active) ? "border-0 bg-success text-white" : ""}`}
-                      >
-                        {toBool(user.is_active) ? "Active" : "Inactive"}
-                      </Badge>
-                    </TableCell>
-                    <TableCell>
-                      <Badge
-                        variant={toBool(user.is_2fa_enabled) ? "default" : "secondary"}
-                        className={`text-[10px] ${toBool(user.is_2fa_enabled) ? "border-0 bg-[#2563EB] text-white" : ""}`}
-                      >
-                        {toBool(user.is_2fa_enabled) ? "Enabled" : "Disabled"}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="font-mono text-[11px] text-muted-foreground">
-                      {formatDateTime(user.created_at)}
-                    </TableCell>
-                    <TableCell className="font-mono text-[11px] text-muted-foreground">
-                      {formatDateTime(user.last_login_at)}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex items-center justify-end gap-2">
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="h-7 px-2 text-[11px]"
-                          onClick={() => openEditDialog(user)}
-                          disabled={!user.id}
-                        >
-                          <Pencil className="mr-1 size-3" />
-                          Edit
-                        </Button>
+                items.map((user, index) => {
+                  const userId = getResolvedUserId(user)
+                  const isActive = toBool(user.is_active)
+                  const is2faEnabled = toBool(user.is_2fa_enabled)
 
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="h-7 px-2 text-[11px]"
-                          onClick={() => handleToggle2FA(user)}
-                          disabled={!user.id || actionUserId === user.id}
+                  return (
+                    <TableRow key={getUserRowKey(user, index)} className="text-xs">
+                      <TableCell className="font-mono text-[11px] text-muted-foreground">
+                        {getDisplayId(user)}
+                      </TableCell>
+                      <TableCell className="font-medium text-foreground">{getDisplayName(user)}</TableCell>
+                      <TableCell className="text-[11px]">{user.email ?? "—"}</TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className="text-[10px]">
+                          {user.role ?? "—"}
+                        </Badge>
+                      </TableCell>
+                      <TableCell>
+                        <Badge
+                          variant={isActive ? "default" : "secondary"}
+                          className={isActive ? "border-0 bg-emerald-600 text-white text-[10px]" : "text-[10px]"}
                         >
-                          {toBool(user.is_2fa_enabled) ? (
-                            <>
-                              <ShieldOff className="mr-1 size-3" />
-                              Disable 2FA
-                            </>
-                          ) : (
-                            <>
-                              <ShieldCheck className="mr-1 size-3" />
-                              Enable 2FA
-                            </>
-                          )}
-                        </Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))
+                          {isActive ? "Active" : "Inactive"}
+                        </Badge>
+                      </TableCell>
+                      <TableCell>
+                        <Badge
+                          variant={is2faEnabled ? "default" : "secondary"}
+                          className={is2faEnabled ? "border-0 bg-blue-600 text-white text-[10px]" : "text-[10px]"}
+                        >
+                          {is2faEnabled ? "Enabled" : "Disabled"}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="font-mono text-[11px] text-muted-foreground">
+                        {formatDateTime(user.created_at)}
+                      </TableCell>
+                      <TableCell className="font-mono text-[11px] text-muted-foreground">
+                        {formatDateTime(user.last_login_at)}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex items-center justify-end gap-2">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-7 px-2 text-[11px]"
+                            onClick={() => openEditDialog(user)}
+                            disabled={!userId}
+                          >
+                            <Pencil className="mr-1 size-3" />
+                            Edit
+                          </Button>
+
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-7 px-2 text-[11px]"
+                            onClick={() => handleToggle2FA(user)}
+                            disabled={!userId || actionUserId === userId}
+                          >
+                            {is2faEnabled ? (
+                              <>
+                                <ShieldOff className="mr-1 size-3" />
+                                Disable 2FA
+                              </>
+                            ) : (
+                              <>
+                                <ShieldCheck className="mr-1 size-3" />
+                                Enable 2FA
+                              </>
+                            )}
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  )
+                })
               )}
             </TableBody>
           </Table>
@@ -919,16 +921,6 @@ function UsersPageInner() {
                 {formError}
               </div>
             ) : null}
-
-            <div className="grid gap-2">
-              <Label htmlFor="user-username">Username</Label>
-              <Input
-                id="user-username"
-                value={form.username}
-                onChange={(e) => updateForm("username", e.target.value)}
-                placeholder="operator01"
-              />
-            </div>
 
             <div className="grid gap-2">
               <Label htmlFor="user-name">Name</Label>

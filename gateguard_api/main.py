@@ -12,7 +12,7 @@ import pymysql
 from fastapi import FastAPI, Header, HTTPException, Query, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, EmailStr
+from pydantic import BaseModel, Field
 
 from gateguard_api.ai_loader import load_artifacts_on_startup, get_model_version
 from gateguard_api.ai_manager import score_url
@@ -1230,9 +1230,14 @@ def _require_actor_user_id(x_user_id: Optional[str]) -> int:
     if not raw:
         raise HTTPException(status_code=400, detail="X-User-Id header is required")
     try:
-        return int(raw)
+        value = int(raw)
     except ValueError:
         raise HTTPException(status_code=400, detail="invalid X-User-Id header")
+
+    if value <= 0:
+        raise HTTPException(status_code=400, detail="invalid X-User-Id header")
+
+    return value
 
 
 def _user_exists(conn, user_id: int) -> bool:
@@ -1247,6 +1252,10 @@ def _user_exists(conn, user_id: int) -> bool:
 def _serialize_user_row(row: dict) -> dict:
     if not row:
         return {}
+
+    created_at = row.get("created_at")
+    updated_at = row.get("updated_at")
+
     return {
         "user_id": row.get("user_id"),
         "name": row.get("name"),
@@ -1254,14 +1263,40 @@ def _serialize_user_row(row: dict) -> dict:
         "role": row.get("role"),
         "is_active": int(row.get("is_active") or 0),
         "is_2fa_enabled": int(row.get("two_factor_enabled") or 0),
-        "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
-        "updated_at": row.get("updated_at").isoformat() if row.get("updated_at") else None,
+        "created_at": created_at.isoformat() if created_at else None,
+        "updated_at": updated_at.isoformat() if updated_at else None,
     }
+
+
+def _normalize_user_email(raw_email: Optional[str]) -> str:
+    email = (raw_email or "").strip().lower()
+
+    if not email:
+        raise HTTPException(status_code=400, detail="email is required")
+
+    if " " in email:
+        raise HTTPException(status_code=400, detail="invalid email format")
+
+    if email.count("@") != 1:
+        raise HTTPException(status_code=400, detail="invalid email format")
+
+    local_part, domain_part = email.split("@", 1)
+
+    if not local_part or not domain_part:
+        raise HTTPException(status_code=400, detail="invalid email format")
+
+    if "." not in domain_part:
+        raise HTTPException(status_code=400, detail="invalid email format")
+
+    if domain_part.startswith(".") or domain_part.endswith("."):
+        raise HTTPException(status_code=400, detail="invalid email format")
+
+    return email
 
 
 class UserCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
-    email: EmailStr
+    email: str = Field(..., min_length=3, max_length=255)
     role: str
     password: str = Field(..., min_length=8, max_length=255)
     is_active: Optional[int] = 1
@@ -1270,7 +1305,7 @@ class UserCreateRequest(BaseModel):
 
 class UserUpdateRequest(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=100)
-    email: Optional[EmailStr] = None
+    email: Optional[str] = Field(None, min_length=3, max_length=255)
     role: Optional[str] = None
     password: Optional[str] = Field(None, min_length=8, max_length=255)
     is_active: Optional[int] = None
@@ -1386,7 +1421,10 @@ def create_user(
             raise HTTPException(status_code=404, detail="actor user not found")
 
         name = (payload.name or "").strip()
-        email = (str(payload.email) or "").strip().lower()
+        if not name:
+            raise HTTPException(status_code=400, detail="name is required")
+
+        email = _normalize_user_email(payload.email)
         role = _normalize_user_role(payload.role)
         password_hash = _hash_user_password(payload.password)
         is_active = _normalize_bool_flag(payload.is_active, "is_active")
@@ -1426,7 +1464,18 @@ def create_user(
                     two_factor_enabled,
                 ),
             )
-            new_user_id = cur.lastrowid
+            new_user_id = int(cur.lastrowid)
+
+            if two_factor_enabled == 0:
+                cur.execute(
+                    """
+                    UPDATE user_account
+                    SET two_factor_secret = NULL,
+                        two_factor_verified_at = NULL
+                    WHERE user_id = %s
+                    """,
+                    (new_user_id,),
+                )
 
             cur.execute(
                 """
@@ -1462,6 +1511,7 @@ def create_user(
         conn.close()
 
 
+@app.patch("/v1/users/{user_id}")
 @app.put("/v1/users/{user_id}")
 def update_user(
     user_id: int,
@@ -1507,7 +1557,7 @@ def update_user(
                 params.append(name)
 
             if payload.email is not None:
-                email = str(payload.email).strip().lower()
+                email = _normalize_user_email(payload.email)
                 cur.execute(
                     """
                     SELECT user_id
@@ -1547,39 +1597,16 @@ def update_user(
                     updates.append("two_factor_secret = NULL")
                     updates.append("two_factor_verified_at = NULL")
 
-            if not updates:
+            if updates:
+                params.append(user_id)
                 cur.execute(
-                    """
-                    SELECT
-                        user_id,
-                        name,
-                        email,
-                        role,
-                        is_active,
-                        two_factor_enabled,
-                        created_at,
-                        updated_at
-                    FROM user_account
+                    f"""
+                    UPDATE user_account
+                    SET {", ".join(updates)}
                     WHERE user_id = %s
-                    LIMIT 1
                     """,
-                    (user_id,),
+                    tuple(params),
                 )
-                row = cur.fetchone()
-                return {
-                    "ok": True,
-                    "item": _serialize_user_row(row),
-                }
-
-            params.append(user_id)
-            cur.execute(
-                f"""
-                UPDATE user_account
-                SET {", ".join(updates)}
-                WHERE user_id = %s
-                """,
-                tuple(params),
-            )
 
             cur.execute(
                 """
@@ -1611,6 +1638,99 @@ def update_user(
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=f"update user failed: {e}")
+    finally:
+        conn.close()
+
+
+@app.post("/v1/users/{user_id}/toggle-2fa")
+def toggle_user_2fa(
+    user_id: int,
+    x_user_id: Optional[str] = Header(None),
+):
+    actor_user_id = _require_actor_user_id(x_user_id)
+
+    conn = get_db_connection()
+    try:
+        if not _user_exists(conn, actor_user_id):
+            raise HTTPException(status_code=404, detail="actor user not found")
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    user_id,
+                    name,
+                    email,
+                    role,
+                    is_active,
+                    two_factor_enabled,
+                    created_at,
+                    updated_at
+                FROM user_account
+                WHERE user_id = %s
+                LIMIT 1
+                """,
+                (user_id,),
+            )
+            existing = cur.fetchone()
+
+            if not existing:
+                raise HTTPException(status_code=404, detail="user not found")
+
+            current_enabled = int(existing.get("two_factor_enabled") or 0)
+            next_enabled = 0 if current_enabled == 1 else 1
+
+            if next_enabled == 1:
+                cur.execute(
+                    """
+                    UPDATE user_account
+                    SET two_factor_enabled = 1
+                    WHERE user_id = %s
+                    """,
+                    (user_id,),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE user_account
+                    SET two_factor_enabled = 0,
+                        two_factor_secret = NULL,
+                        two_factor_verified_at = NULL
+                    WHERE user_id = %s
+                    """,
+                    (user_id,),
+                )
+
+            cur.execute(
+                """
+                SELECT
+                    user_id,
+                    name,
+                    email,
+                    role,
+                    is_active,
+                    two_factor_enabled,
+                    created_at,
+                    updated_at
+                FROM user_account
+                WHERE user_id = %s
+                LIMIT 1
+                """,
+                (user_id,),
+            )
+            row = cur.fetchone()
+
+        conn.commit()
+        return {
+            "ok": True,
+            "item": _serialize_user_row(row),
+        }
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"toggle 2fa failed: {e}")
     finally:
         conn.close()
 
@@ -1688,7 +1808,6 @@ def delete_user(
         raise HTTPException(status_code=500, detail=f"delete user failed: {e}")
     finally:
         conn.close()
-
 
 # =========================
 # Policy API (policy, policy_rule)

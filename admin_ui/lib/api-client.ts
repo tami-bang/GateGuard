@@ -813,26 +813,26 @@ export function formatLocalDateTimeForFile(value?: string | null): string {
 
 /* =========================
 Users 타입
-- 현재 백엔드 응답 기준 우선
-- 일부 필드는 향후 확장 대비 optional
+- user_id 우선 사용
+- id는 구버전 호환용으로 optional 유지
 ========================= */
 
 export type UserRole = "ADMIN" | "OPERATOR" | "ENGINEER" | string
 
 export type UserItem = {
-  // 현재 응답에서 실제 사용 가능한 핵심 필드
+  user_id?: number | null
+  id?: number | null
+
   name: string
   email: string
   role: UserRole
-  is_active: number | boolean
-  created_at: string | null
 
-  // 백엔드 확장 또는 기존 UI 호환 대비 optional
-  id?: number
-  username?: string | null
+  is_active: number | boolean
   is_2fa_enabled?: number | boolean | null
-  last_login_at?: string | null
+
+  created_at: string | null
   updated_at?: string | null
+  last_login_at?: string | null
 }
 
 export type ListUsersResponse = {
@@ -848,9 +848,7 @@ export type GetUserResponse = {
   user: UserItem
 }
 
-
 export type CreateUserRequest = {
-  username: string
   name: string
   email: string
   role: string
@@ -865,7 +863,6 @@ export type CreateUserResponse = {
 }
 
 export type PatchUserRequest = {
-  username?: string
   name?: string
   email?: string
   role?: string
