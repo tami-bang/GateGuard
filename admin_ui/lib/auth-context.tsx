@@ -23,7 +23,7 @@ const allPages = ["dashboard", "logs", "incidents", "policies", "ai-analysis", "
 
 const roleAccessMap: Record<UserRole, string[]> = {
   Admin: allPages,
-  Operator: ["dashboard", "logs", "incidents", "policies", "audit-log"],
+  Operator: ["dashboard", "logs", "incidents", "policies", "ai-analysis", "audit-log"],
   Engineer: ["dashboard", "logs", "incidents", "ai-analysis", "audit-log"],
 }
 

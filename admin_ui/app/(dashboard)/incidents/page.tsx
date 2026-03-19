@@ -20,9 +20,15 @@ import {
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb"
 
-import { AlertTriangle, Clock3, CheckCircle2, ArrowRight } from "lucide-react"
+import { AlertTriangle, Clock3, CheckCircle2, ArrowRight, Download } from "lucide-react"
 
-import { apiListIncidents, type ReviewEvent } from "@/lib/api-client"
+import {
+  apiListIncidents,
+  downloadCsvFile,
+  escapeCsvValue,
+  formatLocalDateTimeForFile,
+  type ReviewEvent,
+} from "@/lib/api-client"
 
 type IncidentStatusTab = "OPEN" | "IN_PROGRESS" | "CLOSED"
 
@@ -58,6 +64,7 @@ type IncidentsUrlState = {
 const PAGE_SIZE = 10
 const CACHE_TTL_MS = 45_000
 const SUMMARY_CACHE_KEY = "gateguard:incidents:summary"
+const EXPORT_BATCH_SIZE = 500
 
 function readSessionCache<T>(key: string): T | null {
   if (typeof window === "undefined") return null
@@ -105,6 +112,45 @@ function fmt(ts: string | null | undefined): string {
     hour: "2-digit",
     minute: "2-digit",
   })
+}
+
+function formatDateTimeForCsv(value?: string | null): string {
+  if (!value) return ""
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return value
+  return d.toLocaleString()
+}
+
+function buildIncidentsCsv(items: ReviewEvent[]): string {
+  const headers = [
+    "review_id",
+    "log_id",
+    "status",
+    "proposed_action",
+    "reviewer_id",
+    "note",
+    "created_at",
+    "reviewed_at",
+    "generated_policy_id",
+  ]
+
+  const rows = items.map((it) =>
+    [
+      it.review_id,
+      it.log_id,
+      it.status,
+      it.proposed_action,
+      it.reviewer_id,
+      it.note,
+      formatDateTimeForCsv(it.created_at),
+      formatDateTimeForCsv(it.reviewed_at),
+      it.generated_policy_id,
+    ]
+      .map(escapeCsvValue)
+      .join(",")
+  )
+
+  return [headers.join(","), ...rows].join("\n")
 }
 
 function getSummaryAccent(status: IncidentStatusTab): string {
@@ -177,6 +223,7 @@ export default function IncidentsPage() {
   const [tableLoading, setTableLoading] = useState(false)
   const [summaryLoading, setSummaryLoading] = useState(true)
   const [error, setError] = useState("")
+  const [exportLoading, setExportLoading] = useState(false)
 
   const didHydrateFromUrl = useRef(false)
   const didInitialLoad = useRef(false)
@@ -415,6 +462,45 @@ export default function IncidentsPage() {
   const pageStart = total === 0 ? 0 : (page - 1) * PAGE_SIZE + 1
   const pageEnd = Math.min(page * PAGE_SIZE, total)
 
+  async function handleExportCsv() {
+    try {
+      setExportLoading(true)
+      setError("")
+
+      const first = await apiListIncidents({
+        status: activeTab,
+        limit: EXPORT_BATCH_SIZE,
+        page: 1,
+        sort: "created_at",
+        dir: "desc",
+      })
+
+      let allItems = [...(first.items ?? [])]
+      const exportTotal = first.total ?? allItems.length
+
+      for (let nextPage = 2; allItems.length < exportTotal; nextPage += 1) {
+        const batch = await apiListIncidents({
+          status: activeTab,
+          limit: EXPORT_BATCH_SIZE,
+          page: nextPage,
+          sort: "created_at",
+          dir: "desc",
+        })
+
+        if (!batch.items?.length) break
+        allItems = allItems.concat(batch.items)
+      }
+
+      const csv = buildIncidentsCsv(allItems)
+      const filename = `gateguard_incidents_${activeTab.toLowerCase()}_${formatLocalDateTimeForFile()}.csv`
+      downloadCsvFile(filename, csv)
+    } catch (e: any) {
+      setError(e?.message || "Failed to export incidents CSV")
+    } finally {
+      setExportLoading(false)
+    }
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <Breadcrumb>
@@ -429,11 +515,26 @@ export default function IncidentsPage() {
         </BreadcrumbList>
       </Breadcrumb>
 
-      <div>
-        <h1 className="text-xl font-semibold text-[#111827]">Incidents (Review Queue)</h1>
-        <p className="text-sm text-[#6B7280]">
-          {initialLoading ? "Loading incidents..." : `${activeTab.replace("_", " ")} · ${total.toLocaleString()} total`}
-        </p>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold text-[#111827]">Incidents (Review Queue)</h1>
+          <p className="text-sm text-[#6B7280]">
+            {initialLoading ? "Loading incidents..." : `${activeTab.replace("_", " ")} · ${total.toLocaleString()} total`}
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 text-xs transition-all duration-200"
+            onClick={handleExportCsv}
+            disabled={initialLoading || exportLoading || total === 0}
+          >
+            <Download className="mr-1 size-3.5" />
+            {exportLoading ? "Exporting..." : "Export CSV"}
+          </Button>
+        </div>
       </div>
 
       {error ? (

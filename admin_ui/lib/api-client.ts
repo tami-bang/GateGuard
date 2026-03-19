@@ -698,7 +698,10 @@ export async function apiCreatePolicy(req: CreatePolicyRequest): Promise<CreateP
   })
 }
 
-export async function apiCreatePolicyRule(policyId: number, req: CreatePolicyRuleRequest): Promise<CreatePolicyRuleResponse> {
+export async function apiCreatePolicyRule(
+  policyId: number,
+  req: CreatePolicyRuleRequest
+): Promise<CreatePolicyRuleResponse> {
   return await httpJson<CreatePolicyRuleResponse>(`/v1/policies/${policyId}/rules`, {
     method: "POST",
     body: JSON.stringify(req),
@@ -752,4 +755,46 @@ export function toBool(v: any): boolean {
   }
 
   return Boolean(v)
+}
+
+/* =========================
+CSV 유틸
+========================= */
+
+export function escapeCsvValue(value: unknown): string {
+  if (value === null || value === undefined) return ""
+
+  const text = String(value)
+  if (/[",\n]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`
+  }
+  return text
+}
+
+export function downloadCsvFile(filename: string, csvText: string) {
+  if (typeof window === "undefined") return
+
+  const blob = new Blob(["\uFEFF" + csvText], {
+    type: "text/csv;charset=utf-8;",
+  })
+
+  const url = window.URL.createObjectURL(blob)
+  const link = document.createElement("a")
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  window.URL.revokeObjectURL(url)
+}
+
+export function formatLocalDateTimeForFile(value?: string | null): string {
+  const d = value ? new Date(value) : new Date()
+  const yyyy = d.getFullYear()
+  const mm = String(d.getMonth() + 1).padStart(2, "0")
+  const dd = String(d.getDate()).padStart(2, "0")
+  const hh = String(d.getHours()).padStart(2, "0")
+  const mi = String(d.getMinutes()).padStart(2, "0")
+  const ss = String(d.getSeconds()).padStart(2, "0")
+  return `${yyyy}${mm}${dd}_${hh}${mi}${ss}`
 }

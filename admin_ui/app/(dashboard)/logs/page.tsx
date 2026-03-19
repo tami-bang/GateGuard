@@ -22,12 +22,31 @@ import {
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb"
 
-import { Search, X, MessageSquare, Filter, ShieldAlert, Bot, FileText, AlertTriangle, Syringe } from "lucide-react"
+import {
+  Search,
+  X,
+  MessageSquare,
+  Filter,
+  ShieldAlert,
+  Bot,
+  FileText,
+  AlertTriangle,
+  Syringe,
+  Download,
+} from "lucide-react"
 
-import { apiListLogs, type AccessLogItem, type ListLogsResponse } from "@/lib/api-client"
+import {
+  apiListLogs,
+  downloadCsvFile,
+  escapeCsvValue,
+  formatLocalDateTimeForFile,
+  type AccessLogItem,
+  type ListLogsResponse,
+} from "@/lib/api-client"
 
 const PAGE_SIZE = 15
 const CACHE_TTL_MS = 45_000
+const EXPORT_BATCH_SIZE = 500
 
 type FiltersState = {
   decision: string
@@ -245,6 +264,81 @@ function buildLogsQuery(params: {
   return qs.toString()
 }
 
+function formatDateTimeForCsv(value?: string | null): string {
+  if (!value) return ""
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return value
+  return d.toLocaleString()
+}
+
+function buildLogsCsv(items: AccessLogItem[]): string {
+  const headers = [
+    "log_id",
+    "request_id",
+    "detect_timestamp",
+    "client_ip",
+    "client_port",
+    "server_ip",
+    "server_port",
+    "host",
+    "path",
+    "method",
+    "url_norm",
+    "user_agent",
+    "decision",
+    "reason",
+    "decision_stage",
+    "policy_id",
+    "engine_latency_ms",
+    "inject_attempted",
+    "inject_send",
+    "inject_errno",
+    "inject_latency_ms",
+    "inject_status_code",
+    "ai_score",
+    "ai_label",
+    "ai_model_version",
+    "ai_latency_ms",
+    "ai_error_code",
+  ]
+
+  const rows = items.map((it) =>
+    [
+      it.log_id,
+      it.request_id,
+      formatDateTimeForCsv(it.detect_timestamp),
+      it.client_ip,
+      it.client_port,
+      it.server_ip,
+      it.server_port,
+      it.host,
+      it.path,
+      it.method,
+      it.url_norm,
+      it.user_agent,
+      it.decision,
+      it.reason,
+      it.decision_stage,
+      it.policy_id,
+      it.engine_latency_ms,
+      it.inject_attempted,
+      it.inject_send,
+      it.inject_errno,
+      it.inject_latency_ms,
+      it.inject_status_code,
+      typeof it.ai_score === "number" ? it.ai_score.toFixed(4) : "",
+      it.ai_label ?? "",
+      it.ai_model_version,
+      it.ai_latency_ms ?? "",
+      it.ai_error_code ?? "",
+    ]
+      .map(escapeCsvValue)
+      .join(",")
+  )
+
+  return [headers.join(","), ...rows].join("\n")
+}
+
 export default function LogsPage() {
   return (
     <Suspense fallback={<LogsPageSkeleton />}>
@@ -295,6 +389,7 @@ function LogsPageInner() {
   const [tableLoading, setTableLoading] = useState(false)
   const [error, setError] = useState("")
   const [data, setData] = useState<ListLogsResponse | null>(null)
+  const [exportLoading, setExportLoading] = useState(false)
 
   const didHydrateFromUrl = useRef(false)
   const didInitialLoad = useRef(false)
@@ -505,6 +600,57 @@ function LogsPageInner() {
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
   const pageStart = total === 0 ? 0 : offset + 1
   const pageEnd = Math.min(offset + items.length, total)
+
+  async function handleExportCsv() {
+    try {
+      setExportLoading(true)
+      setError("")
+
+      const exportParamsBase = {
+        decision: filters.decision !== "all" ? filters.decision : undefined,
+        stage: filters.stage !== "all" ? filters.stage : undefined,
+        host: filters.host.trim() || undefined,
+        client_ip: filters.clientIp.trim() || undefined,
+        start_time: toApiDateTime(filters.startTime),
+        end_time: toApiDateTime(filters.endTime),
+        min_score: toNumberOrUndefined(filters.minScore),
+        max_score: toNumberOrUndefined(filters.maxScore),
+        inject_attempted: filters.injectAttempted !== "all" ? Number(filters.injectAttempted) : undefined,
+        inject_send: filters.injectSend !== "all" ? Number(filters.injectSend) : undefined,
+        inject_status_code: toNumberOrUndefined(filters.injectStatusCode),
+        sort: sortField || "detect_timestamp",
+        dir: sortDir || "desc",
+      }
+
+      const first = await apiListLogs({
+        ...exportParamsBase,
+        limit: EXPORT_BATCH_SIZE,
+        offset: 0,
+      })
+
+      let allItems = [...(first.items || [])]
+      const exportTotal = first.total ?? allItems.length
+
+      for (let nextOffset = allItems.length; nextOffset < exportTotal; nextOffset += EXPORT_BATCH_SIZE) {
+        const batch = await apiListLogs({
+          ...exportParamsBase,
+          limit: EXPORT_BATCH_SIZE,
+          offset: nextOffset,
+        })
+
+        if (!batch.items?.length) break
+        allItems = allItems.concat(batch.items)
+      }
+
+      const csv = buildLogsCsv(allItems)
+      const filename = `gateguard_logs_${formatLocalDateTimeForFile()}.csv`
+      downloadCsvFile(filename, csv)
+    } catch (e: any) {
+      setError(e?.message || "Failed to export logs CSV")
+    } finally {
+      setExportLoading(false)
+    }
+  }
 
   function commitState(nextState: LogsUrlState) {
     setFilters(nextState.filters)
@@ -799,6 +945,17 @@ function LogsPageInner() {
         </div>
 
         <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 text-xs transition-all duration-200"
+            onClick={handleExportCsv}
+            disabled={initialLoading || exportLoading || total === 0}
+          >
+            <Download className="mr-1 size-3.5" />
+            {exportLoading ? "Exporting..." : "Export CSV"}
+          </Button>
+
           <Button
             variant="outline"
             size="sm"
