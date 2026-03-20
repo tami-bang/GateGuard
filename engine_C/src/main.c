@@ -1,4 +1,3 @@
-// engine_C/src/main.c
 #include "policy.h"
 #include "packet_manager.h"
 #include "http_response_injector.h"
@@ -16,14 +15,53 @@
 #include <uuid/uuid.h>
 #include <mysql/mysql.h>
 
-// runtime config helpers
-static const char* get_env_str(const char* key, const char* def) {
+#define ENGINE_LOG_PREFIX "[ENGINE]"
+#define POLICY_LOG_PREFIX "[POLICY]"
+#define AI_LOG_PREFIX     "[AI]"
+#define INJECT_LOG_PREFIX "[INJECT]"
+#define ERROR_LOG_PREFIX  "[ERROR]"
+
+/*
+ * GateGuard Engine main flow
+ *
+ * 1) packet_manager_run()
+ *    - 지정 인터페이스에서 HTTP 요청 패킷 캡처
+ *
+ * 2) engine_handle_http_event()
+ *    - 관리 UI / 내부 noise 요청 제외
+ *    - access_log 기본 row 생성
+ *    - 정책 캐시 기반 정책 매칭
+ *
+ * 3) policy match 결과 처리
+ *    - BLOCK  -> 즉시 403 + RST injection 후 decision 반영
+ *    - ALLOW  -> access_log decision 갱신
+ *    - REVIEW -> access_log decision 갱신
+ *
+ * 4) policy 미매칭 시 AI scoring
+ *    - FastAPI /v1/score 호출
+ *    - ai_analysis 저장
+ *    - FAIL_STAGE fallback 처리
+ *
+ * 5) AI 최종 판단 처리
+ *    - BLOCK  -> decision 갱신 + review_event + injection
+ *    - ALLOW  -> decision 갱신
+ *    - REVIEW -> decision 갱신
+ *
+ * 주의:
+ * 이 엔진은 OOB(out-of-band) 스니핑 기반 구조이므로
+ * forged 403가 항상 원본 서버 응답보다 먼저 도달한다고 보장되지는 않는다.
+ */
+
+/* runtime config helpers */
+static const char* get_env_str(const char* key, const char* def)
+{
     const char* v = getenv(key);
     if (!v || !v[0]) return def;
     return v;
 }
 
-static int get_env_int(const char* key, int def) {
+static int get_env_int(const char* key, int def)
+{
     const char* v = getenv(key);
     if (!v || !v[0]) return def;
 
@@ -33,7 +71,8 @@ static int get_env_int(const char* key, int def) {
     return (int)n;
 }
 
-static double get_env_double(const char* key, double def) {
+static double get_env_double(const char* key, double def)
+{
     const char* v = getenv(key);
     if (!v || !v[0]) return def;
 
@@ -43,13 +82,15 @@ static double get_env_double(const char* key, double def) {
     return n;
 }
 
-static int64_t now_ms(void) {
+static int64_t now_ms(void)
+{
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return (int64_t)tv.tv_sec * 1000 + (int64_t)tv.tv_usec / 1000;
 }
 
-static int calc_engine_latency_ms(const HttpEvent* ev) {
+static int calc_engine_latency_ms(const HttpEvent* ev)
+{
     if (!ev || ev->detect_ts_ms <= 0) return -1;
 
     int64_t cur = now_ms();
@@ -58,7 +99,8 @@ static int calc_engine_latency_ms(const HttpEvent* ev) {
     return (int)(cur - ev->detect_ts_ms);
 }
 
-static void build_score_endpoint(char* out, size_t outsz) {
+static void build_score_endpoint(char* out, size_t outsz)
+{
     const char* base = get_env_str("AI_BASE_URL", "http://127.0.0.1:8000");
     if (!out || outsz == 0) return;
 
@@ -76,23 +118,15 @@ static void build_score_endpoint(char* out, size_t outsz) {
  * - 외부 Next.js 사이트까지 전역 제외하지 않도록
  *   "admin 요청인지" 먼저 판단한 뒤 제외
  * ------------------------- */
-static int starts_with_path(const char* path, const char* prefix) {
+static int starts_with_path(const char* path, const char* prefix)
+{
     if (!path || !prefix) return 0;
     size_t n = strlen(prefix);
     return strncmp(path, prefix, n) == 0;
 }
 
-static int ends_with_str(const char* s, const char* suffix) {
-    if (!s || !suffix) return 0;
-
-    size_t slen = strlen(s);
-    size_t tlen = strlen(suffix);
-
-    if (slen < tlen) return 0;
-    return strcmp(s + slen - tlen, suffix) == 0;
-}
-
-static int contains_admin_next_param(const char* path) {
+static int contains_admin_next_param(const char* path)
+{
     if (!path || !path[0]) return 0;
 
     return (
@@ -102,7 +136,8 @@ static int contains_admin_next_param(const char* path) {
     );
 }
 
-static int is_internal_admin_host(const char* host) {
+static int is_internal_admin_host(const char* host)
+{
     if (!host || !host[0]) return 0;
 
     return (
@@ -113,7 +148,8 @@ static int is_internal_admin_host(const char* host) {
     );
 }
 
-static int is_internal_admin_request(const HttpEvent* ev) {
+static int is_internal_admin_request(const HttpEvent* ev)
+{
     if (!ev) return 0;
 
     /*
@@ -130,7 +166,8 @@ static int is_internal_admin_request(const HttpEvent* ev) {
     return 0;
 }
 
-static int is_internal_admin_path(const char* path) {
+static int is_internal_admin_path(const char* path)
+{
     if (!path || !path[0]) return 0;
 
     return (
@@ -151,7 +188,8 @@ static int is_internal_admin_path(const char* path) {
     );
 }
 
-static int is_next_internal_request(const char* path) {
+static int is_next_internal_request(const char* path)
+{
     if (!path || !path[0]) return 0;
 
     if (strstr(path, "_rsc=") != NULL) return 1;
@@ -160,7 +198,8 @@ static int is_next_internal_request(const char* path) {
     return 0;
 }
 
-static int is_admin_noise_path(const char* path) {
+static int is_admin_noise_path(const char* path)
+{
     if (!path || !path[0]) return 0;
 
     return (
@@ -169,7 +208,8 @@ static int is_admin_noise_path(const char* path) {
     );
 }
 
-static int is_dev_ai_test_request(const HttpEvent* ev) {
+static int is_dev_ai_test_request(const HttpEvent* ev)
+{
     if (!ev) return 0;
 
     /*
@@ -185,7 +225,8 @@ static int is_dev_ai_test_request(const HttpEvent* ev) {
     );
 }
 
-static int should_skip_noise_event(const HttpEvent* ev) {
+static int should_skip_noise_event(const HttpEvent* ev)
+{
     if (!ev) return 1;
 
     if (is_dev_ai_test_request(ev)) {
@@ -193,9 +234,8 @@ static int should_skip_noise_event(const HttpEvent* ev) {
     }
 
     /*
-     * 핵심:
      * 외부 정상 웹사이트의 /login, /favicon.ico, /_next/, _rsc 요청까지
-     * 전역 제외하면 안 되므로 "admin 요청"으로 먼저 식별한 뒤 skip.
+     * 전역 제외하면 안 되므로 "admin 요청"으로 먼저 식별한 뒤 skip
      */
     if (is_internal_admin_request(ev) && is_admin_noise_path(ev->path)) {
         return 1;
@@ -204,7 +244,8 @@ static int should_skip_noise_event(const HttpEvent* ev) {
     return 0;
 }
 
-static int is_ai_test_signature(const HttpEvent* ev) {
+static int is_ai_test_signature(const HttpEvent* ev)
+{
     if (!ev) return 0;
 
     if (strcmp(ev->meta.client_ip, "127.0.0.1") != 0 &&
@@ -227,16 +268,18 @@ static int is_ai_test_signature(const HttpEvent* ev) {
     return 1;
 }
 
-static int should_bypass_policy_for_ai_test(const HttpEvent* ev) {
+static int should_bypass_policy_for_ai_test(const HttpEvent* ev)
+{
     return is_ai_test_signature(ev);
 }
 
-// globals
+/* globals */
 static MYSQL* g_conn = NULL;
 static policy_cache_t g_cache;
 
-// DB 연결
-static MYSQL* db_connect(void) {
+/* DB 연결 */
+static MYSQL* db_connect(void)
+{
     const char* db_host = get_env_str("DB_HOST", "127.0.0.1");
     int db_port = get_env_int("DB_PORT", 3306);
     const char* db_user = get_env_str("DB_USER", "gateguard");
@@ -245,7 +288,7 @@ static MYSQL* db_connect(void) {
 
     MYSQL* conn = mysql_init(NULL);
     if (!conn) {
-        fprintf(stderr, "mysql_init failed\n");
+        fprintf(stderr, "%s mysql_init failed\n", ERROR_LOG_PREFIX);
         exit(1);
     }
 
@@ -257,15 +300,29 @@ static MYSQL* db_connect(void) {
     if (!mysql_real_connect(conn, db_host, db_user, db_pass, db_name, (unsigned int)db_port, NULL, 0))
     {
         fprintf(stderr,
-                "mysql connect failed: host=%s port=%d user=%s db=%s err=%s\n",
-                db_host, db_port, db_user, db_name, mysql_error(conn));
+                "%s mysql connect failed: host=%s port=%d user=%s db=%s err=%s\n",
+                ERROR_LOG_PREFIX,
+                db_host,
+                db_port,
+                db_user,
+                db_name,
+                mysql_error(conn));
         mysql_close(conn);
         exit(1);
     }
+
+    printf("%s db connected: host=%s port=%d user=%s db=%s\n",
+           ENGINE_LOG_PREFIX,
+           db_host,
+           db_port,
+           db_user,
+           db_name);
+
     return conn;
 }
 
-static const char* ai_error_to_code(const ai_result_t* ar, char* out, size_t outsz) {
+static const char* ai_error_to_code(const ai_result_t* ar, char* out, size_t outsz)
+{
     if (!out || outsz == 0) return "";
     out[0] = '\0';
 
@@ -299,11 +356,11 @@ static const char* ai_error_to_code(const ai_result_t* ar, char* out, size_t out
     return out;
 }
 
-// 핵심 엔진 처리
-void engine_handle_http_event(const HttpEvent* ev) {
+/* 핵심 엔진 처리 */
+void engine_handle_http_event(const HttpEvent* ev)
+{
     if (!ev || !ev->is_http) return;
 
-    /* 관리 UI / 내부 요청 노이즈는 여기서 조기 제외 */
     if (should_skip_noise_event(ev) && !is_ai_test_signature(ev)) {
         return;
     }
@@ -328,7 +385,8 @@ void engine_handle_http_event(const HttpEvent* ev) {
 
     if (log_id < 0) {
         fprintf(stderr,
-                "[ACCESS_LOG] insert failed: request_id=%s client_ip=%s host=%s path=%s\n",
+                "%s access_log insert failed: request_id=%s client_ip=%s host=%s path=%s\n",
+                ERROR_LOG_PREFIX,
                 request_id,
                 ev->meta.client_ip ? ev->meta.client_ip : "NULL",
                 ev->host ? ev->host : "NULL",
@@ -348,13 +406,21 @@ void engine_handle_http_event(const HttpEvent* ev) {
 
     if (d.matched)
     {
+        printf("%s matched: log_id=%lld policy_id=%lld action=%d host=%s path=%s\n",
+               POLICY_LOG_PREFIX,
+               log_id,
+               d.policy_id,
+               d.action,
+               ev->host ? ev->host : "NULL",
+               ev->path ? ev->path : "NULL");
+
         if (d.action == ACT_BLOCK)
         {
             /*
              * POLICY BLOCK fast path
              * - access_log row는 이미 생성됨
              * - policy 기반 차단은 AI/후처리 없이 즉시 inject 가능
-             * - 따라서 403 선점 가능성을 조금이라도 높이기 위해
+             * - 403 선점 가능성을 조금이라도 높이기 위해
              *   inject를 decision/update보다 먼저 수행
              */
             http_response_inject(ev, g_conn, log_id, d.block_status_code);
@@ -438,7 +504,8 @@ void engine_handle_http_event(const HttpEvent* ev) {
         int ai_saved = insert_ai_analysis_auto_seq(g_conn, log_id, &ar, ok ? 1 : 0, ec);
         if (ai_saved != 0) {
             fprintf(stderr,
-                    "[AI_ANALYSIS] insert failed: log_id=%lld request_id=%s ok=%d host=%s path=%s score=%.4f label=%s model_version=%s error_code=%s\n",
+                    "%s ai_analysis insert failed: log_id=%lld request_id=%s ok=%d host=%s path=%s score=%.4f label=%s model_version=%s error_code=%s\n",
+                    ERROR_LOG_PREFIX,
                     log_id,
                     request_id,
                     ok,
@@ -464,6 +531,15 @@ void engine_handle_http_event(const HttpEvent* ev) {
 
     if (!ok)
     {
+        fprintf(stderr,
+                "%s classify failed: log_id=%lld request_id=%s error_code=%s host=%s path=%s\n",
+                AI_LOG_PREFIX,
+                log_id,
+                request_id,
+                ec ? ec : "AI_EMPTY",
+                ev->host ? ev->host : "NULL",
+                ev->path ? ev->path : "NULL");
+
         update_access_log_decision(
             g_conn,
             log_id,
@@ -479,6 +555,16 @@ void engine_handle_http_event(const HttpEvent* ev) {
     double threshold = get_env_double("THRESHOLD", 0.50);
     action_t final = decision_manager_decide(&ar, threshold);
 
+    printf("%s classify result: log_id=%lld score=%.4f label=%s threshold=%.2f final=%d host=%s path=%s\n",
+           AI_LOG_PREFIX,
+           log_id,
+           ar.score,
+           ar.label[0] ? ar.label : "NULL",
+           threshold,
+           final,
+           ev->host ? ev->host : "NULL",
+           ev->path ? ev->path : "NULL");
+
     if (final == ACT_BLOCK)
     {
         update_access_log_decision(
@@ -491,7 +577,7 @@ void engine_handle_http_event(const HttpEvent* ev) {
             calc_engine_latency_ms(ev)
         );
         (void)insert_review_event_if_needed(g_conn, log_id, "AI_STAGE");
-        http_response_inject(ev, g_conn, log_id, 403);
+        http_response_inject(ev, g_conn, log_id, GG_DEFAULT_BLOCK_STATUS_CODE);
     }
     else if (final == ACT_ALLOW)
     {
@@ -519,8 +605,9 @@ void engine_handle_http_event(const HttpEvent* ev) {
     }
 }
 
-// main
-int main(int argc, char** argv) {
+/* main */
+int main(int argc, char** argv)
+{
     const char* ifname = get_env_str("CAP_IFACE", "enp0s3");
     if (argc >= 2 && argv[1] && argv[1][0]) {
         ifname = argv[1];
@@ -536,18 +623,24 @@ int main(int argc, char** argv) {
     memset(score_endpoint, 0, sizeof(score_endpoint));
     build_score_endpoint(score_endpoint, sizeof(score_endpoint));
 
-    printf("GateGuard Engine Start\n");
-    printf("engine config: iface=%s db_host=%s db_port=%d db_user=%s db_name=%s ai_url=%s\n",
-           ifname, db_host, db_port, db_user, db_name, score_endpoint);
+    printf("%s start\n", ENGINE_LOG_PREFIX);
+    printf("%s config: iface=%s db_host=%s db_port=%d db_user=%s db_name=%s ai_url=%s\n",
+           ENGINE_LOG_PREFIX,
+           ifname,
+           db_host,
+           db_port,
+           db_user,
+           db_name,
+           score_endpoint);
 
     g_conn = db_connect();
 
     if (load_policy_cache(&g_cache, db_host, db_port, db_user, get_env_str("DB_PASSWORD", ""), db_name) != 0)
     {
-        printf("policy load failed\n");
+        fprintf(stderr, "%s policy load failed\n", ERROR_LOG_PREFIX);
     }
 
-    printf("policy loaded: %zu\n", g_cache.policy_count);
+    printf("%s policy loaded: %zu\n", POLICY_LOG_PREFIX, g_cache.policy_count);
 
     ai_client_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
@@ -557,7 +650,9 @@ int main(int argc, char** argv) {
     cfg.timeout_ms = 3000;
 
     if (!ai_client_init(&cfg)) {
-        fprintf(stderr, "ai_client_init failed\n");
+        fprintf(stderr, "%s ai_client_init failed\n", ERROR_LOG_PREFIX);
+    } else {
+        printf("%s client initialized: endpoint=%s\n", AI_LOG_PREFIX, score_endpoint);
     }
 
     packet_manager_run(ifname);
@@ -570,5 +665,6 @@ int main(int argc, char** argv) {
         g_conn = NULL;
     }
 
+    printf("%s shutdown\n", ENGINE_LOG_PREFIX);
     return 0;
 }
