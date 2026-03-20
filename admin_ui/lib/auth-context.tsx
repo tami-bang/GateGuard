@@ -1,7 +1,16 @@
 "use client"
 
 import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from "react"
-import { type User, type UserRole } from "./mock-data"
+
+// ✅ mock-data 의존 제거 → 타입 직접 정의
+type UserRole = "ADMIN" | "OPERATOR" | "ENGINEER"
+
+interface User {
+  id: number
+  name: string
+  email: string
+  role: UserRole | string
+}
 
 let currentUserId: number | null = null
 
@@ -26,6 +35,7 @@ const roleAccessMap: Record<string, string[]> = {
   OPERATOR: ["dashboard", "logs", "incidents", "policies", "ai-analysis", "audit-log", "users"],
   ENGINEER: ["dashboard", "logs", "incidents", "ai-analysis", "audit-log"],
 
+  // legacy 대응
   Admin: allPages,
   Operator: ["dashboard", "logs", "incidents", "policies", "ai-analysis", "audit-log", "users"],
   Engineer: ["dashboard", "logs", "incidents", "ai-analysis", "audit-log"],
