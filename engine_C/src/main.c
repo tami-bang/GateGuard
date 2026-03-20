@@ -121,8 +121,15 @@ static void build_score_endpoint(char* out, size_t outsz)
 static int starts_with_path(const char* path, const char* prefix)
 {
     if (!path || !prefix) return 0;
+
     size_t n = strlen(prefix);
     return strncmp(path, prefix, n) == 0;
+}
+
+static int contains_text(const char* s, const char* needle)
+{
+    if (!s || !needle || !needle[0]) return 0;
+    return strstr(s, needle) != NULL;
 }
 
 static int contains_admin_next_param(const char* path)
@@ -143,8 +150,10 @@ static int is_internal_admin_host(const char* host)
     return (
         strcasecmp(host, "localhost") == 0 ||
         strcasecmp(host, "127.0.0.1") == 0 ||
+        strcasecmp(host, "192.168.1.24") == 0 ||
         strcasecmp(host, "localhost:8080") == 0 ||
-        strcasecmp(host, "127.0.0.1:8080") == 0
+        strcasecmp(host, "127.0.0.1:8080") == 0 ||
+        strcasecmp(host, "192.168.1.24:8080") == 0
     );
 }
 
@@ -154,10 +163,7 @@ static int is_internal_admin_request(const HttpEvent* ev)
 
     /*
      * 외부 시뮬레이션 트래픽은 8080으로 들어오더라도 admin 요청이 아니다.
-     * 따라서 admin 여부는 host 기준으로만 식별한다.
-     *
-     * localhost / 127.0.0.1 계열 Host header 인 경우에만
-     * 내부 admin 요청으로 본다.
+     * 따라서 admin 여부는 Host header 기준으로만 식별한다.
      */
     if (is_internal_admin_host(ev->host)) {
         return 1;
@@ -171,13 +177,14 @@ static int is_internal_admin_path(const char* path)
     if (!path || !path[0]) return 0;
 
     return (
-        strcmp(path, "/") == 0               ||
+        strcmp(path, "/") == 0                 ||
         starts_with_path(path, "/dashboard")   ||
         starts_with_path(path, "/logs")        ||
         starts_with_path(path, "/policies")    ||
         starts_with_path(path, "/incidents")   ||
         starts_with_path(path, "/ai-analysis") ||
         starts_with_path(path, "/audit-log")   ||
+        starts_with_path(path, "/users")       ||
         starts_with_path(path, "/settings")    ||
         starts_with_path(path, "/login")       ||
         starts_with_path(path, "/sign-up")     ||
@@ -192,8 +199,8 @@ static int is_next_internal_request(const char* path)
 {
     if (!path || !path[0]) return 0;
 
-    if (strstr(path, "_rsc=") != NULL) return 1;
-    if (strstr(path, "/_next/") != NULL) return 1;
+    if (contains_text(path, "_rsc=")) return 1;
+    if (starts_with_path(path, "/_next/")) return 1;
 
     return 0;
 }
@@ -361,10 +368,14 @@ void engine_handle_http_event(const HttpEvent* ev)
 {
     if (!ev || !ev->is_http) return;
 
-    if (should_skip_noise_event(ev) && !is_ai_test_signature(ev)) {
-        return;
-    }
-
+	if (should_skip_noise_event(ev) && !is_ai_test_signature(ev)) {
+    	fprintf(stderr,
+        	    "[ENGINE][SKIP_NOISE] host=%s path=%s port=%u\n",
+           		ev->host ? ev->host : "-",
+            	ev->path ? ev->path : "-",
+            	(unsigned)ev->meta.server_port);
+    	return;
+	}
     uuid_t uuid;
     uuid_generate(uuid);
 

@@ -1,5 +1,5 @@
 CC := gcc
-CFLAGS := -O2 -Wall -Wextra -I./include
+CFLAGS := -O2 -Wall -Wextra -Wno-unused-parameter -I./include
 LDFLAGS := -L/usr/lib64/mysql
 LDLIBS := -lpcap -lmysqlclient -luuid -lcurl -lpthread
 

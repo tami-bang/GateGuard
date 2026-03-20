@@ -9,10 +9,15 @@
 typedef _Bool my_bool;
 #endif
 
+#define DB_LOG_PREFIX     "[DB]"
+#define POLICY_LOG_PREFIX "[POLICY]"
+#define ERROR_LOG_PREFIX  "[ERROR]"
+
 static void db_log_conn_error(const char* where, MYSQL* conn)
 {
     fprintf(stderr,
-            "[DB] %s failed: %s\n",
+            "%s %s failed: %s\n",
+            ERROR_LOG_PREFIX,
             where ? where : "unknown",
             conn ? mysql_error(conn) : "conn=NULL");
 }
@@ -20,12 +25,12 @@ static void db_log_conn_error(const char* where, MYSQL* conn)
 static void db_log_stmt_error(const char* where, MYSQL_STMT* stmt)
 {
     fprintf(stderr,
-            "[DB] %s failed: %s\n",
+            "%s %s failed: %s\n",
+            ERROR_LOG_PREFIX,
             where ? where : "unknown",
             stmt ? mysql_stmt_error(stmt) : "stmt=NULL");
 }
 
-// Prepared Statement SQL을 준비하는 공통 함수
 static int stmt_prepare(MYSQL_STMT* stmt, const char* sql)
 {
     if (!stmt || !sql) return -1;
@@ -33,7 +38,6 @@ static int stmt_prepare(MYSQL_STMT* stmt, const char* sql)
     return 0;
 }
 
-// access_log 테이블에 최초 HTTP 요청 로그를 저장
 long long insert_access_log(
     MYSQL* conn,
     const char* request_id,
@@ -46,9 +50,8 @@ long long insert_access_log(
     const char* method,
     const char* url_norm)
 {
-    // 필수값 확인
     if (!conn || !request_id || !client_ip || !host) {
-        fprintf(stderr, "[DB] insert_access_log invalid args\n");
+        fprintf(stderr, "%s insert_access_log invalid args\n", ERROR_LOG_PREFIX);
         return -1;
     }
 
@@ -73,13 +76,11 @@ long long insert_access_log(
     MYSQL_BIND b[9];
     memset(b, 0, sizeof(b));
 
-    // 기본값 보정
     const char* p = (path && path[0]) ? path : "/";
     const char* m = (method && method[0]) ? method : NULL;
     const char* u = (url_norm && url_norm[0]) ? url_norm : NULL;
     const char* sip = (server_ip && server_ip[0]) ? server_ip : NULL;
 
-    // 문자열 길이 계산
     unsigned long l0 = (unsigned long)strlen(request_id);
     unsigned long l1 = (unsigned long)strlen(client_ip);
     unsigned long l2 = sip ? (unsigned long)strlen(sip) : 0;
@@ -88,62 +89,52 @@ long long insert_access_log(
     unsigned long l5 = m ? (unsigned long)strlen(m) : 0;
     unsigned long l6 = u ? (unsigned long)strlen(u) : 0;
 
-    // NULL 여부 설정
     my_bool is_null_client_port = (client_port <= 0) ? 1 : 0;
     my_bool is_null_server_ip = (sip == NULL) ? 1 : 0;
     my_bool is_null_server_port = (server_port <= 0) ? 1 : 0;
     my_bool is_null_method = (m == NULL) ? 1 : 0;
     my_bool is_null_url_norm = (u == NULL) ? 1 : 0;
 
-    // request_id
     b[0].buffer_type = MYSQL_TYPE_STRING;
     b[0].buffer = (char*)request_id;
     b[0].buffer_length = l0;
     b[0].length = &l0;
 
-    // client_ip
     b[1].buffer_type = MYSQL_TYPE_STRING;
     b[1].buffer = (char*)client_ip;
     b[1].buffer_length = l1;
     b[1].length = &l1;
 
-    // client_port
     b[2].buffer_type = MYSQL_TYPE_LONG;
     b[2].buffer = &client_port;
     b[2].is_null = &is_null_client_port;
 
-    // server_ip
     b[3].buffer_type = MYSQL_TYPE_STRING;
     b[3].buffer = (char*)sip;
     b[3].buffer_length = l2;
     b[3].length = &l2;
     b[3].is_null = &is_null_server_ip;
 
-    // server_port
     b[4].buffer_type = MYSQL_TYPE_LONG;
     b[4].buffer = &server_port;
     b[4].is_null = &is_null_server_port;
 
-    // host
     b[5].buffer_type = MYSQL_TYPE_STRING;
     b[5].buffer = (char*)host;
     b[5].buffer_length = l3;
     b[5].length = &l3;
 
-    // path
     b[6].buffer_type = MYSQL_TYPE_STRING;
     b[6].buffer = (char*)p;
     b[6].buffer_length = l4;
     b[6].length = &l4;
 
-    // method
     b[7].buffer_type = MYSQL_TYPE_STRING;
     b[7].buffer = (char*)m;
     b[7].buffer_length = l5;
     b[7].length = &l5;
     b[7].is_null = &is_null_method;
 
-    // url_norm
     b[8].buffer_type = MYSQL_TYPE_STRING;
     b[8].buffer = (char*)u;
     b[8].buffer_length = l6;
@@ -167,7 +158,6 @@ long long insert_access_log(
     return log_id;
 }
 
-// access_log의 탐지 결과(decision)를 업데이트
 void update_access_log_decision(
     MYSQL* conn,
     long long log_id,
@@ -178,7 +168,7 @@ void update_access_log_decision(
     int engine_latency_ms)
 {
     if (!conn || log_id <= 0 || !decision || !reason || !stage) {
-        fprintf(stderr, "[DB] update_access_log_decision invalid args\n");
+        fprintf(stderr, "%s update_access_log_decision invalid args\n", ERROR_LOG_PREFIX);
         return;
     }
 
@@ -250,7 +240,6 @@ void update_access_log_decision(
     mysql_stmt_close(stmt);
 }
 
-// HTTP Injection 처리 결과를 access_log에 기록
 void update_access_log_inject(
     MYSQL* conn,
     long long log_id,
@@ -261,7 +250,7 @@ void update_access_log_inject(
     int status_code)
 {
     if (!conn || log_id <= 0) {
-        fprintf(stderr, "[DB] update_access_log_inject invalid args\n");
+        fprintf(stderr, "%s update_access_log_inject invalid args\n", ERROR_LOG_PREFIX);
         return;
     }
 
@@ -322,11 +311,10 @@ void update_access_log_inject(
     mysql_stmt_close(stmt);
 }
 
-// ai_analysis에서 다음 analysis_seq 값을 조회
 static int get_next_analysis_seq(MYSQL* conn, long long log_id, int* out_seq)
 {
     if (!conn || log_id <= 0 || !out_seq) {
-        fprintf(stderr, "[DB] get_next_analysis_seq invalid args\n");
+        fprintf(stderr, "%s get_next_analysis_seq invalid args\n", ERROR_LOG_PREFIX);
         return -1;
     }
 
@@ -386,7 +374,10 @@ static int get_next_analysis_seq(MYSQL* conn, long long log_id, int* out_seq)
             return -1;
         }
         if (fetch_rc == MYSQL_NO_DATA) {
-            fprintf(stderr, "[DB] mysql_stmt_fetch(get_next_analysis_seq) returned no data for log_id=%lld\n", log_id);
+            fprintf(stderr,
+                    "%s mysql_stmt_fetch(get_next_analysis_seq) returned no data for log_id=%lld\n",
+                    ERROR_LOG_PREFIX,
+                    log_id);
             mysql_stmt_close(stmt);
             return -1;
         }
@@ -398,7 +389,6 @@ static int get_next_analysis_seq(MYSQL* conn, long long log_id, int* out_seq)
     return 0;
 }
 
-// AI 분석 결과를 ai_analysis 테이블에 저장
 int insert_ai_analysis_auto_seq(
     MYSQL* conn,
     long long log_id,
@@ -407,14 +397,14 @@ int insert_ai_analysis_auto_seq(
     const char* error_code)
 {
     if (!conn || log_id <= 0) {
-        fprintf(stderr, "[DB] insert_ai_analysis_auto_seq invalid args\n");
+        fprintf(stderr, "%s insert_ai_analysis_auto_seq invalid args\n", ERROR_LOG_PREFIX);
         return -1;
     }
 
     int seq = 0;
 
     if (get_next_analysis_seq(conn, log_id, &seq) != 0) {
-        fprintf(stderr, "[DB] get_next_analysis_seq failed for log_id=%lld\n", log_id);
+        fprintf(stderr, "%s get_next_analysis_seq failed for log_id=%lld\n", ERROR_LOG_PREFIX, log_id);
         return -1;
     }
 
@@ -493,7 +483,8 @@ int insert_ai_analysis_auto_seq(
     if (mysql_stmt_execute(stmt) != 0) {
         db_log_stmt_error("mysql_stmt_execute(ai_analysis)", stmt);
         fprintf(stderr,
-                "[DB] ai_analysis insert context: log_id=%lld analysis_seq=%d ai_response=%d score=%.4f label=%s model_version=%s error_code=%s latency_ms=%d\n",
+                "%s ai_analysis insert context: log_id=%lld analysis_seq=%d ai_response=%d score=%.4f label=%s model_version=%s error_code=%s latency_ms=%d\n",
+                DB_LOG_PREFIX,
                 log_id,
                 seq,
                 ai_response,
@@ -510,7 +501,6 @@ int insert_ai_analysis_auto_seq(
     return 0;
 }
 
-// BLOCK 이벤트 발생 시 review_event 자동 생성
 int insert_review_event_if_needed(
     MYSQL* conn,
     long long log_id,
@@ -563,12 +553,12 @@ int insert_review_event_if_needed(
     stmt = mysql_stmt_init(conn);
 
     if (!stmt) {
-        fprintf(stderr, "[DB] mysql_stmt_init failed for review_event insert\n");
+        fprintf(stderr, "%s mysql_stmt_init failed for review_event insert\n", ERROR_LOG_PREFIX);
         return -1;
     }
 
     if (mysql_stmt_prepare(stmt, sql, (unsigned long)strlen(sql)) != 0) {
-        fprintf(stderr, "[DB] mysql_stmt_prepare failed: %s\n", mysql_stmt_error(stmt));
+        fprintf(stderr, "%s mysql_stmt_prepare(review_event) failed: %s\n", ERROR_LOG_PREFIX, mysql_stmt_error(stmt));
         mysql_stmt_close(stmt);
         return -1;
     }
@@ -590,13 +580,13 @@ int insert_review_event_if_needed(
     b[3].buffer = &log_id;
 
     if (mysql_stmt_bind_param(stmt, b) != 0) {
-        fprintf(stderr, "[DB] mysql_stmt_bind_param failed: %s\n", mysql_stmt_error(stmt));
+        fprintf(stderr, "%s mysql_stmt_bind_param(review_event) failed: %s\n", ERROR_LOG_PREFIX, mysql_stmt_error(stmt));
         mysql_stmt_close(stmt);
         return -1;
     }
 
     if (mysql_stmt_execute(stmt) != 0) {
-        fprintf(stderr, "[DB] mysql_stmt_execute failed: %s\n", mysql_stmt_error(stmt));
+        fprintf(stderr, "%s mysql_stmt_execute(review_event) failed: %s\n", ERROR_LOG_PREFIX, mysql_stmt_error(stmt));
         mysql_stmt_close(stmt);
         return -1;
     }
@@ -606,9 +596,11 @@ int insert_review_event_if_needed(
     mysql_stmt_close(stmt);
 
     if (affected > 0) {
-        printf("[REVIEW_EVENT] created for log_id=%lld stage=%s\n",
+        printf("%s review_event created: log_id=%lld stage=%s proposed_action=%s\n",
+               POLICY_LOG_PREFIX,
                log_id,
-               decision_stage ? decision_stage : "UNKNOWN");
+               decision_stage ? decision_stage : "UNKNOWN",
+               proposed_action);
         return 1;
     }
 

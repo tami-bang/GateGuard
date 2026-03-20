@@ -6,6 +6,9 @@
 #include <ctype.h>
 #include <regex.h>
 
+#define POLICY_LOG_PREFIX "[POLICY]"
+#define ERROR_LOG_PREFIX  "[ERROR]"
+
 /* ---------- 유틸 ---------- */
 
 static int streq_ci(const char* a, const char* b)
@@ -13,7 +16,8 @@ static int streq_ci(const char* a, const char* b)
     if (!a || !b) return 0;
     while (*a && *b) {
         if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) return 0;
-        a++; b++;
+        a++;
+        b++;
     }
     return (*a == '\0' && *b == '\0');
 }
@@ -38,7 +42,6 @@ static int contains_substr(const char* s, const char* sub, int case_sensitive)
 
     if (case_sensitive) return (strstr(s, sub) != NULL);
 
-    /* case-insensitive strstr */
     size_t n = strlen(s);
     size_t m = strlen(sub);
     if (m == 0) return 1;
@@ -47,7 +50,7 @@ static int contains_substr(const char* s, const char* sub, int case_sensitive)
     for (size_t i = 0; i + m <= n; i++) {
         size_t k = 0;
         for (; k < m; k++) {
-            if (tolower((unsigned char)s[i+k]) != tolower((unsigned char)sub[k])) break;
+            if (tolower((unsigned char)s[i + k]) != tolower((unsigned char)sub[k])) break;
         }
         if (k == m) return 1;
     }
@@ -122,7 +125,7 @@ static rule_type_t rule_type_from_str(const char* s)
     if (!s) return RT_HOST;
     if (strcasecmp(s, "HOST") == 0) return RT_HOST;
     if (strcasecmp(s, "PATH") == 0) return RT_PATH;
-    if (strcasecmp(s, "URL")  == 0) return RT_URL;
+    if (strcasecmp(s, "URL") == 0)  return RT_URL;
     return RT_HOST;
 }
 
@@ -164,13 +167,13 @@ static MYSQL* policy_db_connect(const char* host, int port, const char* user, co
     mysql_options(conn, MYSQL_OPT_PROTOCOL, &proto);
 
     if (!mysql_real_connect(conn, host, user, pass, db, port, NULL, 0)) {
-        fprintf(stderr, "[POLICY_DB] connect failed: %s\n", mysql_error(conn));
+        fprintf(stderr, "%s policy db connect failed: %s\n", ERROR_LOG_PREFIX, mysql_error(conn));
         mysql_close(conn);
         return NULL;
     }
 
-    fprintf(stderr, "[POLICY_DB] host=%s port=%d user=%s db=%s\n", host, port, user, db);
-    fprintf(stderr, "[POLICY_DB] connected via: %s\n", mysql_get_host_info(conn));
+    fprintf(stderr, "%s db host=%s port=%d user=%s db=%s\n", POLICY_LOG_PREFIX, host, port, user, db);
+    fprintf(stderr, "%s db connected via: %s\n", POLICY_LOG_PREFIX, mysql_get_host_info(conn));
     return conn;
 }
 
@@ -188,10 +191,6 @@ int load_policy_cache(policy_cache_t* cache,
     MYSQL* conn = policy_db_connect(host, port, user, pass, db);
     if (!conn) return -1;
 
-    /*
-     * policy: is_enabled=1 인 것만
-     * - policy_id, policy_name, policy_type, action, priority, is_enabled, risk_level, category, block_status_code, redirect_url
-     */
     const char* q1 =
         "SELECT policy_id, policy_name, policy_type, action, priority, is_enabled, "
         "       risk_level, category, block_status_code, redirect_url "
@@ -200,14 +199,14 @@ int load_policy_cache(policy_cache_t* cache,
         "ORDER BY priority ASC, policy_id ASC";
 
     if (mysql_query(conn, q1) != 0) {
-        fprintf(stderr, "[POLICY_DB] query policy failed: %s\n", mysql_error(conn));
+        fprintf(stderr, "%s query policy failed: %s\n", ERROR_LOG_PREFIX, mysql_error(conn));
         mysql_close(conn);
         return -1;
     }
 
     MYSQL_RES* res = mysql_store_result(conn);
     if (!res) {
-        fprintf(stderr, "[POLICY_DB] store_result failed: %s\n", mysql_error(conn));
+        fprintf(stderr, "%s policy store_result failed: %s\n", ERROR_LOG_PREFIX, mysql_error(conn));
         mysql_close(conn);
         return -1;
     }
@@ -239,10 +238,6 @@ int load_policy_cache(policy_cache_t* cache,
 
     mysql_free_result(res);
 
-    /*
-     * policy_rule: is_enabled=1 인 룰을 policy_id별로 읽어서 각 policy.rules에 넣음
-     * - rule_id, policy_id, rule_type, match_type, pattern, is_case_sensitive, is_negated, rule_order, is_enabled
-     */
     const char* q2 =
         "SELECT rule_id, policy_id, rule_type, match_type, pattern, "
         "       is_case_sensitive, is_negated, rule_order, is_enabled "
@@ -251,7 +246,7 @@ int load_policy_cache(policy_cache_t* cache,
         "ORDER BY policy_id ASC, rule_order ASC, rule_id ASC";
 
     if (mysql_query(conn, q2) != 0) {
-        fprintf(stderr, "[POLICY_DB] query policy_rule failed: %s\n", mysql_error(conn));
+        fprintf(stderr, "%s query policy_rule failed: %s\n", ERROR_LOG_PREFIX, mysql_error(conn));
         mysql_close(conn);
         free_policy_cache(cache);
         return -1;
@@ -259,13 +254,12 @@ int load_policy_cache(policy_cache_t* cache,
 
     MYSQL_RES* res2 = mysql_store_result(conn);
     if (!res2) {
-        fprintf(stderr, "[POLICY_DB] store_result(rule) failed: %s\n", mysql_error(conn));
+        fprintf(stderr, "%s policy_rule store_result failed: %s\n", ERROR_LOG_PREFIX, mysql_error(conn));
         mysql_close(conn);
         free_policy_cache(cache);
         return -1;
     }
 
-    /* 1-pass: policy별 rule_count 계산 */
     size_t* counts = (size_t*)calloc(cache->policy_count, sizeof(size_t));
     if (!counts) {
         mysql_free_result(res2);
@@ -285,7 +279,6 @@ int load_policy_cache(policy_cache_t* cache,
         }
     }
 
-    /* allocate rules */
     for (size_t i = 0; i < cache->policy_count; i++) {
         if (counts[i] > 0) {
             cache->policies[i].rules = (policy_rule_t*)calloc(counts[i], sizeof(policy_rule_t));
@@ -293,7 +286,6 @@ int load_policy_cache(policy_cache_t* cache,
         }
     }
 
-    /* 2-pass: fill */
     mysql_data_seek(res2, 0);
     while ((rrow = mysql_fetch_row(res2)) != NULL) {
         policy_rule_t rr;
@@ -319,6 +311,8 @@ int load_policy_cache(policy_cache_t* cache,
         }
     }
 
+    fprintf(stderr, "%s cache loaded: policy_count=%zu\n", POLICY_LOG_PREFIX, cache->policy_count);
+
     free(counts);
     mysql_free_result(res2);
     mysql_close(conn);
@@ -343,8 +337,6 @@ policy_decision_t match_policy(const policy_cache_t* cache,
     for (size_t i = 0; i < cache->policy_count; i++) {
         const policy_t* pol = &cache->policies[i];
         if (!pol->is_enabled) continue;
-
-        /* 룰이 0개면 매칭 불가 */
         if (!pol->rules || pol->rule_count == 0) continue;
 
         int any_match = 0;
