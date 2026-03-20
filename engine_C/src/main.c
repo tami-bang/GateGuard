@@ -109,18 +109,20 @@ static int is_internal_admin_host(const char* host) {
         strcasecmp(host, "localhost") == 0 ||
         strcasecmp(host, "127.0.0.1") == 0 ||
         strcasecmp(host, "localhost:8080") == 0 ||
-        strcasecmp(host, "127.0.0.1:8080") == 0 ||
-        ends_with_str(host, ":8080")
+        strcasecmp(host, "127.0.0.1:8080") == 0
     );
 }
 
 static int is_internal_admin_request(const HttpEvent* ev) {
     if (!ev) return 0;
 
-    if ((int)ev->meta.server_port == 8080) {
-        return 1;
-    }
-
+    /*
+     * 외부 시뮬레이션 트래픽은 8080으로 들어오더라도 admin 요청이 아니다.
+     * 따라서 admin 여부는 host 기준으로만 식별한다.
+     *
+     * localhost / 127.0.0.1 계열 Host header 인 경우에만
+     * 내부 admin 요청으로 본다.
+     */
     if (is_internal_admin_host(ev->host)) {
         return 1;
     }
@@ -170,6 +172,9 @@ static int is_admin_noise_path(const char* path) {
 static int is_dev_ai_test_request(const HttpEvent* ev) {
     if (!ev) return 0;
 
+    /*
+     * 데모용 테스트 요청은 8080으로 들어오더라도 noise 제외 대상이 아님
+     */
     if ((int)ev->meta.server_port != 8080) return 0;
     if (!ev->path) return 0;
 
@@ -345,27 +350,68 @@ void engine_handle_http_event(const HttpEvent* ev) {
     {
         if (d.action == ACT_BLOCK)
         {
-            update_access_log_decision(g_conn, log_id, "BLOCK", "POLICY", "POLICY_STAGE", d.policy_id, calc_engine_latency_ms(ev));
-            (void)insert_review_event_if_needed(g_conn, log_id, "POLICY_STAGE");
+            /*
+             * POLICY BLOCK fast path
+             * - access_log row는 이미 생성됨
+             * - policy 기반 차단은 AI/후처리 없이 즉시 inject 가능
+             * - 따라서 403 선점 가능성을 조금이라도 높이기 위해
+             *   inject를 decision/update보다 먼저 수행
+             */
             http_response_inject(ev, g_conn, log_id, d.block_status_code);
+
+            update_access_log_decision(
+                g_conn,
+                log_id,
+                "BLOCK",
+                "POLICY",
+                "POLICY_STAGE",
+                d.policy_id,
+                calc_engine_latency_ms(ev)
+            );
+
+            (void)insert_review_event_if_needed(g_conn, log_id, "POLICY_STAGE");
             return;
         }
 
         if (d.action == ACT_ALLOW)
         {
-            update_access_log_decision(g_conn, log_id, "ALLOW", "POLICY", "POLICY_STAGE", d.policy_id, calc_engine_latency_ms(ev));
+            update_access_log_decision(
+                g_conn,
+                log_id,
+                "ALLOW",
+                "POLICY",
+                "POLICY_STAGE",
+                d.policy_id,
+                calc_engine_latency_ms(ev)
+            );
             return;
         }
 
         if (d.action == ACT_REDIRECT)
         {
-            update_access_log_decision(g_conn, log_id, "REVIEW", "POLICY", "POLICY_STAGE", d.policy_id, calc_engine_latency_ms(ev));
+            update_access_log_decision(
+                g_conn,
+                log_id,
+                "REVIEW",
+                "POLICY",
+                "POLICY_STAGE",
+                d.policy_id,
+                calc_engine_latency_ms(ev)
+            );
             return;
         }
 
         if (d.action == ACT_REVIEW)
         {
-            update_access_log_decision(g_conn, log_id, "REVIEW", "POLICY", "POLICY_STAGE", d.policy_id, calc_engine_latency_ms(ev));
+            update_access_log_decision(
+                g_conn,
+                log_id,
+                "REVIEW",
+                "POLICY",
+                "POLICY_STAGE",
+                d.policy_id,
+                calc_engine_latency_ms(ev)
+            );
             return;
         }
     }
@@ -418,7 +464,15 @@ void engine_handle_http_event(const HttpEvent* ev) {
 
     if (!ok)
     {
-        update_access_log_decision(g_conn, log_id, "REVIEW", "SYSTEM", "FAIL_STAGE", 0, calc_engine_latency_ms(ev));
+        update_access_log_decision(
+            g_conn,
+            log_id,
+            "REVIEW",
+            "SYSTEM",
+            "FAIL_STAGE",
+            0,
+            calc_engine_latency_ms(ev)
+        );
         return;
     }
 
@@ -427,17 +481,41 @@ void engine_handle_http_event(const HttpEvent* ev) {
 
     if (final == ACT_BLOCK)
     {
-        update_access_log_decision(g_conn, log_id, "BLOCK", "AI", "AI_STAGE", 0, calc_engine_latency_ms(ev));
+        update_access_log_decision(
+            g_conn,
+            log_id,
+            "BLOCK",
+            "AI",
+            "AI_STAGE",
+            0,
+            calc_engine_latency_ms(ev)
+        );
         (void)insert_review_event_if_needed(g_conn, log_id, "AI_STAGE");
         http_response_inject(ev, g_conn, log_id, 403);
     }
     else if (final == ACT_ALLOW)
     {
-        update_access_log_decision(g_conn, log_id, "ALLOW", "AI", "AI_STAGE", 0, calc_engine_latency_ms(ev));
+        update_access_log_decision(
+            g_conn,
+            log_id,
+            "ALLOW",
+            "AI",
+            "AI_STAGE",
+            0,
+            calc_engine_latency_ms(ev)
+        );
     }
     else
     {
-        update_access_log_decision(g_conn, log_id, "REVIEW", "AI", "AI_STAGE", 0, calc_engine_latency_ms(ev));
+        update_access_log_decision(
+            g_conn,
+            log_id,
+            "REVIEW",
+            "AI",
+            "AI_STAGE",
+            0,
+            calc_engine_latency_ms(ev)
+        );
     }
 }
 

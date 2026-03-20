@@ -1,4 +1,3 @@
-// src/http_response_injector.c
 #include "http_response_injector.h"
 #include "policy.h"
 #include "packet_forge_util.h"
@@ -8,12 +7,22 @@
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>
+#include <stdlib.h>
+#include <strings.h>
 #include <sys/time.h>
 
 #include <netinet/tcp.h>
 #ifndef TH_PUSH
 #define TH_PUSH TH_PSH
 #endif
+
+typedef struct {
+    int initialized;
+    int rst_repeat_count;      /* 1 or 2 */
+    int enable_extra_403_retry;/* 0 or 1 */
+} inject_runtime_cfg_t;
+
+static inject_runtime_cfg_t g_inject_cfg = {0, 1, 0};
 
 static int now_ms(void)
 {
@@ -22,27 +31,173 @@ static int now_ms(void)
     return (int)(tv.tv_sec * 1000 + tv.tv_usec / 1000);
 }
 
-static size_t build_http_403(char* out, size_t cap)
+static int env_flag_enabled(const char* key, int defval)
 {
-    const char* body = "Blocked by GateGuard\n";
-    char buf[512];
+    const char* v = getenv(key);
+    if (!v || !v[0]) return defval;
 
-    int body_len = (int)strlen(body);
-    int n = snprintf(buf, sizeof(buf),
-        "HTTP/1.1 403 Forbidden\r\n"
-        "Content-Type: text/plain\r\n"
-        "Content-Length: %d\r\n"
-        "Connection: close\r\n"
-        "\r\n"
-        "%s",
-        body_len, body
-    );
+    if (strcmp(v, "1") == 0) return 1;
+    if (strcasecmp(v, "true") == 0) return 1;
+    if (strcasecmp(v, "yes") == 0) return 1;
+    if (strcasecmp(v, "on") == 0) return 1;
 
-    if (n <= 0) return 0;
-    if ((size_t)n >= cap) return 0;
+    if (strcmp(v, "0") == 0) return 0;
+    if (strcasecmp(v, "false") == 0) return 0;
+    if (strcasecmp(v, "no") == 0) return 0;
+    if (strcasecmp(v, "off") == 0) return 0;
 
-    memcpy(out, buf, (size_t)n);
-    return (size_t)n;
+    return defval;
+}
+
+static void load_inject_runtime_cfg_once(void)
+{
+    if (g_inject_cfg.initialized) return;
+
+    /*
+     * GG_INJECT_RST_REPEAT=1 이면 RST 2회
+     * 기본은 1회
+     */
+    g_inject_cfg.rst_repeat_count = env_flag_enabled("GG_INJECT_RST_REPEAT", 0) ? 2 : 1;
+
+    /*
+     * GG_INJECT_403_RETRY=1 이면 403 1회 추가 전송
+     * 기본은 0
+     */
+    g_inject_cfg.enable_extra_403_retry = env_flag_enabled("GG_INJECT_403_RETRY", 0) ? 1 : 0;
+
+    g_inject_cfg.initialized = 1;
+}
+
+static int validate_event_for_injection(const HttpEvent* ev, int* out_errno)
+{
+    if (!ev) {
+        if (out_errno) *out_errno = EINVAL;
+        return -1;
+    }
+
+    if (ev->meta.client_ip_nbo == 0 || ev->meta.server_ip_nbo == 0) {
+        if (out_errno) *out_errno = EINVAL;
+        return -1;
+    }
+
+    if (ev->meta.client_port_nbo == 0 || ev->meta.server_port_nbo == 0) {
+        if (out_errno) *out_errno = EINVAL;
+        return -1;
+    }
+
+    /*
+     * request payload 길이가 0이면 ACK 계산 신뢰성이 떨어질 수 있으므로
+     * 최소한 방어적으로 실패 처리
+     */
+    if (ev->payload_len <= 0) {
+        if (out_errno) *out_errno = EINVAL;
+        return -1;
+    }
+
+    return 0;
+}
+
+/*
+ * 403 payload는 매 호출마다 snprintf 하지 않고
+ * 고정 바이트열을 바로 사용한다.
+ * body까지 포함하되 최대한 짧게 유지한다.
+ */
+static const char k_http_403_payload[] =
+    "HTTP/1.1 403 Forbidden\r\n"
+    "Content-Length: 21\r\n"
+    "Content-Type: text/plain\r\n"
+    "Connection: close\r\n"
+    "Cache-Control: no-store\r\n"
+    "\r\n"
+    "Blocked by GateGuard\n";
+
+static const size_t k_http_403_payload_len = sizeof(k_http_403_payload) - 1;
+
+static int send_forged_tcp(uint32_t src_ip_nbo,
+                           uint32_t dst_ip_nbo,
+                           uint16_t src_port_nbo,
+                           uint16_t dst_port_nbo,
+                           uint32_t seq,
+                           uint32_t ack,
+                           uint8_t tcp_flags,
+                           const uint8_t* payload,
+                           size_t payload_len,
+                           uint16_t ip_id,
+                           int* out_errno)
+{
+    uint8_t pkt[1600];
+    size_t pkt_len = 0;
+
+    if (out_errno) *out_errno = 0;
+
+    if (packet_forge_build_tcp_ipv4(
+            pkt, sizeof(pkt), &pkt_len,
+            src_ip_nbo, dst_ip_nbo,
+            src_port_nbo, dst_port_nbo,
+            seq, ack,
+            tcp_flags,
+            payload, payload_len,
+            ip_id
+        ) != 0)
+    {
+        if (out_errno) *out_errno = EINVAL;
+        return -1;
+    }
+
+    if (raw_send_ipv4(pkt, pkt_len, dst_ip_nbo, out_errno) != 0) {
+        if (out_errno && *out_errno == 0) *out_errno = EIO;
+        return -1;
+    }
+
+    return 0;
+}
+
+static int send_forged_tcp_repeat(uint32_t src_ip_nbo,
+                                  uint32_t dst_ip_nbo,
+                                  uint16_t src_port_nbo,
+                                  uint16_t dst_port_nbo,
+                                  uint32_t seq,
+                                  uint32_t ack,
+                                  uint8_t tcp_flags,
+                                  const uint8_t* payload,
+                                  size_t payload_len,
+                                  uint16_t base_ip_id,
+                                  int repeat_count,
+                                  int* out_errno)
+{
+    int i;
+    int last_err = 0;
+    int success = 0;
+
+    if (repeat_count <= 0) repeat_count = 1;
+
+    for (i = 0; i < repeat_count; i++) {
+        int step_errno = 0;
+        uint16_t ip_id = (uint16_t)(base_ip_id + (uint16_t)i);
+
+        if (send_forged_tcp(
+                src_ip_nbo, dst_ip_nbo,
+                src_port_nbo, dst_port_nbo,
+                seq, ack,
+                tcp_flags,
+                payload, payload_len,
+                ip_id,
+                &step_errno
+            ) == 0)
+        {
+            success = 1;
+        } else {
+            last_err = step_errno;
+        }
+    }
+
+    if (success) {
+        if (out_errno) *out_errno = 0;
+        return 0;
+    }
+
+    if (out_errno) *out_errno = (last_err != 0 ? last_err : EIO);
+    return -1;
 }
 
 void http_response_inject(const HttpEvent* ev, MYSQL* conn, long long log_id, int status_code)
@@ -54,53 +209,144 @@ void http_response_inject(const HttpEvent* ev, MYSQL* conn, long long log_id, in
     int inj_errno = 0;
     int latency = 0;
 
-    // 1) 403 payload 구성
-    char payload[512];
-    size_t payload_len = build_http_403(payload, sizeof(payload));
-    if (payload_len == 0) {
-        inj_errno = EINVAL;
+    int err_403_1 = 0;
+    int err_403_2 = 0;
+    int err_rst_s2c = 0;
+    int err_rst_c2s = 0;
+
+    uint32_t cli_seq;
+    uint32_t cli_ack;
+    uint32_t req_end;
+    uint32_t srv_seq_for_403;
+    uint32_t srv_ack_for_403;
+    uint32_t srv_seq_after_403;
+    int rst_repeat_count;
+    int enable_extra_403_retry;
+
+    load_inject_runtime_cfg_once();
+
+    if (validate_event_for_injection(ev, &inj_errno) != 0) {
         latency = now_ms() - t0;
-        update_access_log_inject(conn, log_id, attempted, send_ok, inj_errno, latency,
+        update_access_log_inject(conn,
+                                 log_id,
+                                 attempted,
+                                 send_ok,
+                                 inj_errno,
+                                 latency,
                                  status_code > 0 ? status_code : 403);
         return;
     }
 
-    // 2) forged packet 생성 (server -> client 방향)
-    //    seq: client가 기대하는 server seq = ev.meta.ack
-    //    ack: server가 확인할 client 데이터 끝 = ev.meta.seq + request_payload_len
-    uint32_t seq = (uint32_t)ev->meta.ack;
-    uint32_t ack = (uint32_t)(ev->meta.seq + (uint32_t)ev->payload_len);
+    rst_repeat_count = g_inject_cfg.rst_repeat_count;
+    enable_extra_403_retry = g_inject_cfg.enable_extra_403_retry;
 
-    uint8_t pkt[1600];
-    size_t pkt_len = 0;
+    /*
+     * 캡처 기준:
+     *   client -> server HTTP request
+     *
+     * client seq = ev->meta.seq
+     * client ack = ev->meta.ack (client이 기대하는 server next seq)
+     * request end = client seq + request payload len
+     *
+     * forged server->client 403:
+     *   seq = client ack
+     *   ack = request end
+     */
+    cli_seq = (uint32_t)ev->meta.seq;
+    cli_ack = (uint32_t)ev->meta.ack;
+    req_end = (uint32_t)(cli_seq + (uint32_t)ev->payload_len);
 
-    uint16_t ip_id = (uint16_t)(log_id & 0xFFFF);
+    srv_seq_for_403 = cli_ack;
+    srv_ack_for_403 = req_end;
+    srv_seq_after_403 = srv_seq_for_403 + (uint32_t)k_http_403_payload_len;
 
-    int rc = packet_forge_build_tcp_ipv4(
-        pkt, sizeof(pkt), &pkt_len,
-        ev->meta.server_ip_nbo, ev->meta.client_ip_nbo,
-        ev->meta.server_port_nbo, ev->meta.client_port_nbo,
-        seq, ack,
-        (uint8_t)(TH_ACK | TH_PUSH),   // 최소 ACK+PSH
-        (const uint8_t*)payload, payload_len,
-        ip_id
-    );
-
-    if (rc != 0) {
-        inj_errno = EINVAL;
-        latency = now_ms() - t0;
-        update_access_log_inject(conn, log_id, attempted, send_ok, inj_errno, latency,
-                                 status_code > 0 ? status_code : 403);
-        return;
-    }
-
-    // 3) raw send
-    if (raw_send_ipv4(pkt, pkt_len, ev->meta.client_ip_nbo, &inj_errno) == 0) {
+    /*
+     * STEP 1) forged 403 first
+     * 프로젝트 취지상 사용자에게 차단 메시지를 먼저 보여주는 경로를 최우선으로 둔다.
+     */
+    if (send_forged_tcp(
+            ev->meta.server_ip_nbo, ev->meta.client_ip_nbo,
+            ev->meta.server_port_nbo, ev->meta.client_port_nbo,
+            srv_seq_for_403,
+            srv_ack_for_403,
+            (uint8_t)(TH_ACK | TH_PUSH),
+            (const uint8_t*)k_http_403_payload,
+            k_http_403_payload_len,
+            (uint16_t)(log_id & 0xFFFF),
+            &err_403_1
+        ) == 0)
+    {
         send_ok = 1;
-        inj_errno = 0;
+    }
+
+    /*
+     * STEP 1-1) optional extra 403 retry
+     * 같은 seq/ack로 한 번 더 보내서 표시 성공률을 약간 높인다.
+     * 기본 비활성화.
+     */
+    if (enable_extra_403_retry) {
+        if (send_forged_tcp(
+                ev->meta.server_ip_nbo, ev->meta.client_ip_nbo,
+                ev->meta.server_port_nbo, ev->meta.client_port_nbo,
+                srv_seq_for_403,
+                srv_ack_for_403,
+                (uint8_t)(TH_ACK | TH_PUSH),
+                (const uint8_t*)k_http_403_payload,
+                k_http_403_payload_len,
+                (uint16_t)((log_id + 8) & 0xFFFF),
+                &err_403_2
+            ) == 0)
+        {
+            send_ok = 1;
+        }
+    }
+
+    /*
+     * STEP 2) server -> client RST
+     * forged 403 뒤에 세션을 빠르게 종료
+     */
+    if (send_forged_tcp_repeat(
+            ev->meta.server_ip_nbo, ev->meta.client_ip_nbo,
+            ev->meta.server_port_nbo, ev->meta.client_port_nbo,
+            srv_seq_after_403,
+            srv_ack_for_403,
+            (uint8_t)(TH_RST | TH_ACK),
+            NULL, 0,
+            (uint16_t)((log_id + 16) & 0xFFFF),
+            rst_repeat_count,
+            &err_rst_s2c
+        ) == 0)
+    {
+        send_ok = 1;
+    }
+
+    /*
+     * STEP 3) client -> server RST
+     * 서버도 세션을 빨리 정리하게 함
+     */
+    if (send_forged_tcp_repeat(
+            ev->meta.client_ip_nbo, ev->meta.server_ip_nbo,
+            ev->meta.client_port_nbo, ev->meta.server_port_nbo,
+            req_end,
+            cli_ack,
+            (uint8_t)(TH_RST | TH_ACK),
+            NULL, 0,
+            (uint16_t)((log_id + 32) & 0xFFFF),
+            rst_repeat_count,
+            &err_rst_c2s
+        ) == 0)
+    {
+        send_ok = 1;
+    }
+
+    if (!send_ok) {
+        if (err_403_1) inj_errno = err_403_1;
+        else if (err_403_2) inj_errno = err_403_2;
+        else if (err_rst_s2c) inj_errno = err_rst_s2c;
+        else if (err_rst_c2s) inj_errno = err_rst_c2s;
+        else inj_errno = EIO;
     } else {
-        send_ok = 0;
-        if (inj_errno == 0) inj_errno = EIO;
+        inj_errno = 0;
     }
 
     latency = now_ms() - t0;
@@ -112,5 +358,14 @@ void http_response_inject(const HttpEvent* ev, MYSQL* conn, long long log_id, in
                              inj_errno,
                              latency,
                              status_code > 0 ? status_code : 403);
-	printf("[inject] log_id=%lld send_ok=%d errno=%d\n", log_id, send_ok, inj_errno);
+
+    printf("[inject] log_id=%lld 403_1=%s 403_2=%s rst_s2c=%s rst_c2s=%s final_ok=%d errno=%d rst_repeat=%d\n",
+           log_id,
+           (err_403_1 == 0 ? "ok" : "fail"),
+           (enable_extra_403_retry ? (err_403_2 == 0 ? "ok" : "fail") : "skip"),
+           (err_rst_s2c == 0 ? "ok" : "fail"),
+           (err_rst_c2s == 0 ? "ok" : "fail"),
+           send_ok,
+           inj_errno,
+           rst_repeat_count);
 }
