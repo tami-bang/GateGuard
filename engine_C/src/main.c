@@ -43,16 +43,20 @@
  *    - FAIL_STAGE fallback 처리
  *
  * 5) AI 최종 판단 처리
- *    - BLOCK  -> decision 갱신 + review_event + injection
+ *    - BLOCK  -> 즉시 inject 후 decision 갱신
  *    - ALLOW  -> decision 갱신
  *    - REVIEW -> decision 갱신
  *
  * 주의:
  * 이 엔진은 OOB(out-of-band) 스니핑 기반 구조이므로
  * forged 403가 항상 원본 서버 응답보다 먼저 도달한다고 보장되지는 않는다.
+ * 다만 inject를 최대한 앞당겨 선행 가능성을 높인다.
  */
 
-/* runtime config helpers */
+/* ------------------------- */
+/* runtime config helpers    */
+/* ------------------------- */
+
 static const char* get_env_str(const char* key, const char* def)
 {
     const char* v = getenv(key);
@@ -102,22 +106,62 @@ static int calc_engine_latency_ms(const HttpEvent* ev)
 static void build_score_endpoint(char* out, size_t outsz)
 {
     const char* base = get_env_str("AI_BASE_URL", "http://127.0.0.1:8000");
+
     if (!out || outsz == 0) return;
 
+    out[0] = '\0';
+
     size_t len = strlen(base);
-    if (len > 0 && base[len - 1] == '/')
-        snprintf(out, outsz, "%sv1/score", base);
-    else
-        snprintf(out, outsz, "%s/v1/score", base);
+    int n;
+
+    if (len > 0 && base[len - 1] == '/') {
+        n = snprintf(out, outsz, "%sv1/score", base);
+    } else {
+        n = snprintf(out, outsz, "%s/v1/score", base);
+    }
+
+    if (n < 0 || (size_t)n >= outsz) {
+        if (outsz > 0) {
+            out[outsz - 1] = '\0';
+        }
+    }
 }
 
-/* -------------------------
- * 내부/관리 UI 노이즈 필터
- * - source IP는 필터 기준이 아님
- * - host/server_port + path 성격으로 필터링
- * - 외부 Next.js 사이트까지 전역 제외하지 않도록
- *   "admin 요청인지" 먼저 판단한 뒤 제외
- * ------------------------- */
+static const char* safe_str(const char* s)
+{
+    return (s && s[0]) ? s : "-";
+}
+
+static const char* action_to_text(action_t action)
+{
+    switch (action) {
+        case ACT_ALLOW:    return "ALLOW";
+        case ACT_BLOCK:    return "BLOCK";
+        case ACT_REDIRECT: return "REDIRECT";
+        case ACT_REVIEW:   return "REVIEW";
+        default:           return "UNKNOWN";
+    }
+}
+
+static void log_engine_decision(const HttpEvent* ev,
+                                const char* decision,
+                                const char* stage,
+                                const char* reason)
+{
+    fprintf(stderr,
+            "%s decision host=%s path=%s decision=%s stage=%s reason=%s\n",
+            ENGINE_LOG_PREFIX,
+            safe_str(ev ? ev->host : NULL),
+            safe_str(ev ? ev->path : NULL),
+            safe_str(decision),
+            safe_str(stage),
+            safe_str(reason));
+}
+
+/* ------------------------- */
+/* 내부/관리 UI 노이즈 필터     */
+/* ------------------------- */
+
 static int starts_with_path(const char* path, const char* prefix)
 {
     if (!path || !prefix) return 0;
@@ -157,27 +201,11 @@ static int is_internal_admin_host(const char* host)
     );
 }
 
-static int is_internal_admin_request(const HttpEvent* ev)
-{
-    if (!ev) return 0;
-
-    /*
-     * 외부 시뮬레이션 트래픽은 8080으로 들어오더라도 admin 요청이 아니다.
-     * 따라서 admin 여부는 Host header 기준으로만 식별한다.
-     */
-    if (is_internal_admin_host(ev->host)) {
-        return 1;
-    }
-
-    return 0;
-}
-
 static int is_internal_admin_path(const char* path)
 {
     if (!path || !path[0]) return 0;
 
     return (
-        strcmp(path, "/") == 0                 ||
         starts_with_path(path, "/dashboard")   ||
         starts_with_path(path, "/logs")        ||
         starts_with_path(path, "/policies")    ||
@@ -218,12 +246,13 @@ static int is_admin_noise_path(const char* path)
 static int is_dev_ai_test_request(const HttpEvent* ev)
 {
     if (!ev) return 0;
+    if (!ev->path) return 0;
 
     /*
-     * 데모용 테스트 요청은 8080으로 들어오더라도 noise 제외 대상이 아님
+     * 데모용 테스트 요청은 8080으로 들어오더라도 noise 제외 대상이 아니다.
+     * 외부 Windows -> VM 테스트에서도 그대로 통과되어야 한다.
      */
     if ((int)ev->meta.server_port != 8080) return 0;
-    if (!ev->path) return 0;
 
     return (
         strcmp(ev->path, "/score-check") == 0 ||
@@ -232,31 +261,12 @@ static int is_dev_ai_test_request(const HttpEvent* ev)
     );
 }
 
-static int should_skip_noise_event(const HttpEvent* ev)
-{
-    if (!ev) return 1;
-
-    if (is_dev_ai_test_request(ev)) {
-        return 0;
-    }
-
-    /*
-     * 외부 정상 웹사이트의 /login, /favicon.ico, /_next/, _rsc 요청까지
-     * 전역 제외하면 안 되므로 "admin 요청"으로 먼저 식별한 뒤 skip
-     */
-    if (is_internal_admin_request(ev) && is_admin_noise_path(ev->path)) {
-        return 1;
-    }
-
-    return 0;
-}
-
 static int is_ai_test_signature(const HttpEvent* ev)
 {
     if (!ev) return 0;
 
-    if (strcmp(ev->meta.client_ip, "127.0.0.1") != 0 &&
-        strcmp(ev->meta.client_ip, "192.168.1.24") != 0) {
+    if (strcmp(safe_str(ev->meta.client_ip), "127.0.0.1") != 0 &&
+        strcmp(safe_str(ev->meta.client_ip), "192.168.1.24") != 0) {
         return 0;
     }
 
@@ -275,16 +285,69 @@ static int is_ai_test_signature(const HttpEvent* ev)
     return 1;
 }
 
+static int is_internal_admin_request(const HttpEvent* ev)
+{
+    if (!ev) return 0;
+
+    /*
+     * 외부 정상 웹사이트 트래픽도 8080으로 들어올 수 있으므로
+     * server_port만으로 admin 요청으로 보면 안 된다.
+     *
+     * 아래 중 하나면 admin 성격 요청으로 본다.
+     * 1) Host header가 내부 admin host
+     * 2) 8080으로 들어왔고 path가 admin/next 내부 요청 형태
+     */
+    if (is_internal_admin_host(ev->host)) {
+        return 1;
+    }
+
+    if ((int)ev->meta.server_port == 8080 &&
+        (is_internal_admin_path(ev->path) || is_next_internal_request(ev->path))) {
+        return 1;
+    }
+
+    return 0;
+}
+
+static int should_skip_noise_event(const HttpEvent* ev)
+{
+    if (!ev) return 1;
+
+    if (is_dev_ai_test_request(ev)) {
+        return 0;
+    }
+
+    if (is_ai_test_signature(ev)) {
+        return 0;
+    }
+
+    /*
+     * 외부 정상 사이트의 /login, /favicon.ico, /_next/, _rsc 요청까지
+     * 전역 제외하면 안 되므로 admin 성격이 확인된 요청만 skip
+     */
+    if (is_internal_admin_request(ev) && is_admin_noise_path(ev->path)) {
+        return 1;
+    }
+
+    return 0;
+}
+
 static int should_bypass_policy_for_ai_test(const HttpEvent* ev)
 {
     return is_ai_test_signature(ev);
 }
 
-/* globals */
+/* ------------------------- */
+/* globals                   */
+/* ------------------------- */
+
 static MYSQL* g_conn = NULL;
 static policy_cache_t g_cache;
 
-/* DB 연결 */
+/* ------------------------- */
+/* DB 연결                   */
+/* ------------------------- */
+
 static MYSQL* db_connect(void)
 {
     const char* db_host = get_env_str("DB_HOST", "127.0.0.1");
@@ -304,8 +367,7 @@ static MYSQL* db_connect(void)
     unsigned int proto = MYSQL_PROTOCOL_TCP;
     mysql_options(conn, MYSQL_OPT_PROTOCOL, &proto);
 
-    if (!mysql_real_connect(conn, db_host, db_user, db_pass, db_name, (unsigned int)db_port, NULL, 0))
-    {
+    if (!mysql_real_connect(conn, db_host, db_user, db_pass, db_name, (unsigned int)db_port, NULL, 0)) {
         fprintf(stderr,
                 "%s mysql connect failed: host=%s port=%d user=%s db=%s err=%s\n",
                 ERROR_LOG_PREFIX,
@@ -318,12 +380,13 @@ static MYSQL* db_connect(void)
         exit(1);
     }
 
-    printf("%s db connected: host=%s port=%d user=%s db=%s\n",
-           ENGINE_LOG_PREFIX,
-           db_host,
-           db_port,
-           db_user,
-           db_name);
+    fprintf(stderr,
+            "%s db connected: host=%s port=%d user=%s db=%s\n",
+            ENGINE_LOG_PREFIX,
+            db_host,
+            db_port,
+            db_user,
+            db_name);
 
     return conn;
 }
@@ -360,27 +423,50 @@ static const char* ai_error_to_code(const ai_result_t* ar, char* out, size_t out
             snprintf(out, outsz, "AI_EMPTY");
             break;
     }
+
     return out;
 }
 
-/* 핵심 엔진 처리 */
+/* ------------------------- */
+/* 핵심 엔진 처리             */
+/* ------------------------- */
+
 void engine_handle_http_event(const HttpEvent* ev)
 {
     if (!ev || !ev->is_http) return;
 
-	if (should_skip_noise_event(ev) && !is_ai_test_signature(ev)) {
-    	fprintf(stderr,
-        	    "[ENGINE][SKIP_NOISE] host=%s path=%s port=%u\n",
-           		ev->host ? ev->host : "-",
-            	ev->path ? ev->path : "-",
-            	(unsigned)ev->meta.server_port);
-    	return;
-	}
+    fprintf(stderr,
+            "%s request host=%s path=%s method=%s client_ip=%s server_ip=%s server_port=%u\n",
+            ENGINE_LOG_PREFIX,
+            safe_str(ev->host),
+            safe_str(ev->path),
+            safe_str(ev->method),
+            safe_str(ev->meta.client_ip),
+            safe_str(ev->meta.server_ip),
+            (unsigned)ev->meta.server_port);
+
+    if (should_skip_noise_event(ev)) {
+        fprintf(stderr,
+                "%s skip noise host=%s path=%s port=%u\n",
+                ENGINE_LOG_PREFIX,
+                safe_str(ev->host),
+                safe_str(ev->path),
+                (unsigned)ev->meta.server_port);
+        return;
+    }
+
     uuid_t uuid;
     uuid_generate(uuid);
 
     char request_id[37];
     uuid_unparse(uuid, request_id);
+
+    fprintf(stderr,
+            "%s access_log insert start request_id=%s host=%s path=%s\n",
+            ENGINE_LOG_PREFIX,
+            request_id,
+            safe_str(ev->host),
+            safe_str(ev->path));
 
     long long log_id =
         insert_access_log(g_conn,
@@ -399,11 +485,17 @@ void engine_handle_http_event(const HttpEvent* ev)
                 "%s access_log insert failed: request_id=%s client_ip=%s host=%s path=%s\n",
                 ERROR_LOG_PREFIX,
                 request_id,
-                ev->meta.client_ip ? ev->meta.client_ip : "NULL",
-                ev->host ? ev->host : "NULL",
-                ev->path ? ev->path : "NULL");
+                safe_str(ev->meta.client_ip),
+                safe_str(ev->host),
+                safe_str(ev->path));
         return;
     }
+
+    fprintf(stderr,
+            "%s access_log insert done request_id=%s log_id=%lld\n",
+            ENGINE_LOG_PREFIX,
+            request_id,
+            log_id);
 
     policy_decision_t d =
         match_policy(&g_cache,
@@ -415,18 +507,17 @@ void engine_handle_http_event(const HttpEvent* ev)
         memset(&d, 0, sizeof(d));
     }
 
-    if (d.matched)
-    {
-        printf("%s matched: log_id=%lld policy_id=%lld action=%d host=%s path=%s\n",
-               POLICY_LOG_PREFIX,
-               log_id,
-               d.policy_id,
-               d.action,
-               ev->host ? ev->host : "NULL",
-               ev->path ? ev->path : "NULL");
+    if (d.matched) {
+        fprintf(stderr,
+                "%s matched log_id=%lld policy_id=%lld action=%s host=%s path=%s\n",
+                POLICY_LOG_PREFIX,
+                log_id,
+                d.policy_id,
+                action_to_text(d.action),
+                safe_str(ev->host),
+                safe_str(ev->path));
 
-        if (d.action == ACT_BLOCK)
-        {
+        if (d.action == ACT_BLOCK) {
             /*
              * POLICY BLOCK fast path
              * - access_log row는 이미 생성됨
@@ -447,11 +538,11 @@ void engine_handle_http_event(const HttpEvent* ev)
             );
 
             (void)insert_review_event_if_needed(g_conn, log_id, "POLICY_STAGE");
+            log_engine_decision(ev, "BLOCK", "POLICY_STAGE", "POLICY");
             return;
         }
 
-        if (d.action == ACT_ALLOW)
-        {
+        if (d.action == ACT_ALLOW) {
             update_access_log_decision(
                 g_conn,
                 log_id,
@@ -461,11 +552,15 @@ void engine_handle_http_event(const HttpEvent* ev)
                 d.policy_id,
                 calc_engine_latency_ms(ev)
             );
+            log_engine_decision(ev, "ALLOW", "POLICY_STAGE", "POLICY");
             return;
         }
 
-        if (d.action == ACT_REDIRECT)
-        {
+        if (d.action == ACT_REDIRECT) {
+            /*
+             * 현재 엔진은 redirect injection 미구현 상태이므로
+             * REVIEW로 다운그레이드 처리
+             */
             update_access_log_decision(
                 g_conn,
                 log_id,
@@ -475,11 +570,11 @@ void engine_handle_http_event(const HttpEvent* ev)
                 d.policy_id,
                 calc_engine_latency_ms(ev)
             );
+            log_engine_decision(ev, "REVIEW", "POLICY_STAGE", "POLICY");
             return;
         }
 
-        if (d.action == ACT_REVIEW)
-        {
+        if (d.action == ACT_REVIEW) {
             update_access_log_decision(
                 g_conn,
                 log_id,
@@ -489,8 +584,16 @@ void engine_handle_http_event(const HttpEvent* ev)
                 d.policy_id,
                 calc_engine_latency_ms(ev)
             );
+            log_engine_decision(ev, "REVIEW", "POLICY_STAGE", "POLICY");
             return;
         }
+
+        fprintf(stderr,
+                "%s matched policy but unknown action=%s host=%s path=%s\n",
+                ENGINE_LOG_PREFIX,
+                action_to_text(d.action),
+                safe_str(ev->host),
+                safe_str(ev->path));
     }
 
     ai_result_t ar;
@@ -520,12 +623,12 @@ void engine_handle_http_event(const HttpEvent* ev)
                     log_id,
                     request_id,
                     ok,
-                    ev->host ? ev->host : "NULL",
-                    ev->path ? ev->path : "NULL",
+                    safe_str(ev->host),
+                    safe_str(ev->path),
                     ar.score,
-                    ar.label[0] ? ar.label : "NULL",
-                    ar.model_version[0] ? ar.model_version : "NULL",
-                    ec ? ec : "NULL");
+                    safe_str(ar.label),
+                    safe_str(ar.model_version),
+                    safe_str(ec));
 
             update_access_log_decision(
                 g_conn,
@@ -536,20 +639,20 @@ void engine_handle_http_event(const HttpEvent* ev)
                 0,
                 calc_engine_latency_ms(ev)
             );
+            log_engine_decision(ev, "REVIEW", "FAIL_STAGE", "SYSTEM");
             return;
         }
     }
 
-    if (!ok)
-    {
+    if (!ok) {
         fprintf(stderr,
                 "%s classify failed: log_id=%lld request_id=%s error_code=%s host=%s path=%s\n",
                 AI_LOG_PREFIX,
                 log_id,
                 request_id,
                 ec ? ec : "AI_EMPTY",
-                ev->host ? ev->host : "NULL",
-                ev->path ? ev->path : "NULL");
+                safe_str(ev->host),
+                safe_str(ev->path));
 
         update_access_log_decision(
             g_conn,
@@ -560,24 +663,32 @@ void engine_handle_http_event(const HttpEvent* ev)
             0,
             calc_engine_latency_ms(ev)
         );
+        log_engine_decision(ev, "REVIEW", "FAIL_STAGE", "SYSTEM");
         return;
     }
 
     double threshold = get_env_double("THRESHOLD", 0.50);
     action_t final = decision_manager_decide(&ar, threshold);
 
-    printf("%s classify result: log_id=%lld score=%.4f label=%s threshold=%.2f final=%d host=%s path=%s\n",
-           AI_LOG_PREFIX,
-           log_id,
-           ar.score,
-           ar.label[0] ? ar.label : "NULL",
-           threshold,
-           final,
-           ev->host ? ev->host : "NULL",
-           ev->path ? ev->path : "NULL");
+    fprintf(stderr,
+            "%s classify result: log_id=%lld score=%.4f label=%s threshold=%.2f final=%s host=%s path=%s\n",
+            AI_LOG_PREFIX,
+            log_id,
+            ar.score,
+            safe_str(ar.label),
+            threshold,
+            action_to_text(final),
+            safe_str(ev->host),
+            safe_str(ev->path));
 
-    if (final == ACT_BLOCK)
-    {
+    if (final == ACT_BLOCK) {
+        /*
+         * AI BLOCK fast path
+         * - 최종 판정이 끝난 즉시 inject 우선
+         * - decision/update 및 review_event는 그 다음
+         */
+        http_response_inject(ev, g_conn, log_id, GG_DEFAULT_BLOCK_STATUS_CODE);
+
         update_access_log_decision(
             g_conn,
             log_id,
@@ -588,10 +699,9 @@ void engine_handle_http_event(const HttpEvent* ev)
             calc_engine_latency_ms(ev)
         );
         (void)insert_review_event_if_needed(g_conn, log_id, "AI_STAGE");
-        http_response_inject(ev, g_conn, log_id, GG_DEFAULT_BLOCK_STATUS_CODE);
+        log_engine_decision(ev, "BLOCK", "AI_STAGE", "AI");
     }
-    else if (final == ACT_ALLOW)
-    {
+    else if (final == ACT_ALLOW) {
         update_access_log_decision(
             g_conn,
             log_id,
@@ -601,9 +711,9 @@ void engine_handle_http_event(const HttpEvent* ev)
             0,
             calc_engine_latency_ms(ev)
         );
+        log_engine_decision(ev, "ALLOW", "AI_STAGE", "AI");
     }
-    else
-    {
+    else {
         update_access_log_decision(
             g_conn,
             log_id,
@@ -613,10 +723,14 @@ void engine_handle_http_event(const HttpEvent* ev)
             0,
             calc_engine_latency_ms(ev)
         );
+        log_engine_decision(ev, "REVIEW", "AI_STAGE", "AI");
     }
 }
 
-/* main */
+/* ------------------------- */
+/* main                      */
+/* ------------------------- */
+
 int main(int argc, char** argv)
 {
     const char* ifname = get_env_str("CAP_IFACE", "enp0s3");
@@ -634,24 +748,29 @@ int main(int argc, char** argv)
     memset(score_endpoint, 0, sizeof(score_endpoint));
     build_score_endpoint(score_endpoint, sizeof(score_endpoint));
 
-    printf("%s start\n", ENGINE_LOG_PREFIX);
-    printf("%s config: iface=%s db_host=%s db_port=%d db_user=%s db_name=%s ai_url=%s\n",
-           ENGINE_LOG_PREFIX,
-           ifname,
-           db_host,
-           db_port,
-           db_user,
-           db_name,
-           score_endpoint);
+    fprintf(stderr, "%s start\n", ENGINE_LOG_PREFIX);
+    fprintf(stderr,
+            "%s config: iface=%s db_host=%s db_port=%d db_user=%s db_name=%s ai_url=%s\n",
+            ENGINE_LOG_PREFIX,
+            ifname,
+            db_host,
+            db_port,
+            db_user,
+            db_name,
+            score_endpoint);
 
     g_conn = db_connect();
 
-    if (load_policy_cache(&g_cache, db_host, db_port, db_user, get_env_str("DB_PASSWORD", ""), db_name) != 0)
-    {
+    if (load_policy_cache(&g_cache,
+                          db_host,
+                          db_port,
+                          db_user,
+                          get_env_str("DB_PASSWORD", ""),
+                          db_name) != 0) {
         fprintf(stderr, "%s policy load failed\n", ERROR_LOG_PREFIX);
     }
 
-    printf("%s policy loaded: %zu\n", POLICY_LOG_PREFIX, g_cache.policy_count);
+    fprintf(stderr, "%s policy loaded: %zu\n", POLICY_LOG_PREFIX, g_cache.policy_count);
 
     ai_client_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
@@ -663,7 +782,7 @@ int main(int argc, char** argv)
     if (!ai_client_init(&cfg)) {
         fprintf(stderr, "%s ai_client_init failed\n", ERROR_LOG_PREFIX);
     } else {
-        printf("%s client initialized: endpoint=%s\n", AI_LOG_PREFIX, score_endpoint);
+        fprintf(stderr, "%s client initialized: endpoint=%s\n", AI_LOG_PREFIX, score_endpoint);
     }
 
     packet_manager_run(ifname);
@@ -676,6 +795,6 @@ int main(int argc, char** argv)
         g_conn = NULL;
     }
 
-    printf("%s shutdown\n", ENGINE_LOG_PREFIX);
+    fprintf(stderr, "%s shutdown\n", ENGINE_LOG_PREFIX);
     return 0;
 }

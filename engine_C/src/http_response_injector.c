@@ -57,16 +57,18 @@ static void load_inject_runtime_cfg_once(void)
     if (g_inject_cfg.initialized) return;
 
     /*
-     * GG_INJECT_RST_REPEAT=1  -> RST를 2회 전송
-     * 기본값                 -> 1회 전송
+     * GG_INJECT_RST_REPEAT=1  -> RST 2회 전송
+     * 기본값                 -> RST 1회 전송
      */
-    g_inject_cfg.rst_repeat_count = env_flag_enabled("GG_INJECT_RST_REPEAT", 0) ? 2 : 1;
+    g_inject_cfg.rst_repeat_count =
+        env_flag_enabled("GG_INJECT_RST_REPEAT", 0) ? 2 : 1;
 
     /*
-     * GG_INJECT_403_RETRY=1  -> 403을 1회 추가 재전송
+     * GG_INJECT_403_RETRY=1  -> 403 1회 추가 재전송
      * 기본값                -> 비활성화
      */
-    g_inject_cfg.enable_extra_403_retry = env_flag_enabled("GG_INJECT_403_RETRY", 0) ? 1 : 0;
+    g_inject_cfg.enable_extra_403_retry =
+        env_flag_enabled("GG_INJECT_403_RETRY", 0) ? 1 : 0;
 
     g_inject_cfg.initialized = 1;
 }
@@ -89,8 +91,8 @@ static int validate_event_for_injection(const HttpEvent* ev, int* out_errno)
     }
 
     /*
-     * request payload 길이가 0이면 ACK 계산 신뢰성이 떨어질 수 있으므로
-     * 방어적으로 injection 실패 처리한다.
+     * request payload 길이가 0이면
+     * ACK 계산 신뢰성이 떨어질 수 있으므로 방어적으로 실패 처리
      */
     if (ev->payload_len <= 0) {
         if (out_errno) *out_errno = EINVAL;
@@ -101,9 +103,10 @@ static int validate_event_for_injection(const HttpEvent* ev, int* out_errno)
 }
 
 /*
- * 403 payload는 동적 조립 대신 고정 바이트열 사용
- * - hot path snprintf 제거
- * - body 포함 최소 길이 유지
+ * hot path 최적화:
+ * - 고정 payload 사용
+ * - 문자열 조립 비용 제거
+ * - 프로젝트 목적상 403 고정 응답으로 충분
  */
 static const char k_http_403_payload[] =
     "HTTP/1.1 403 Forbidden\r\n"
@@ -262,21 +265,15 @@ void http_response_inject(const HttpEvent* ev, MYSQL* conn, long long log_id, in
      * Injection sequence
      *
      * 1) forged server -> client HTTP 403
-     *    - 사용자 브라우저에 차단 응답을 먼저 보이게 시도
-     *
      * 2) forged server -> client RST
-     *    - 403 뒤 서버 방향 세션을 빠르게 종료
-     *
      * 3) forged client -> server RST
-     *    - 대상 서버 측 세션도 정리
      *
-     * 즉, 프로젝트 의도상 "403 선전송"이 우선이고
-     * 그 다음 양방향 RST로 연결을 닫는다.
+     * 즉 403을 먼저 보여주고, 그 다음 양방향 종료를 시도한다.
      */
 
     /*
      * 캡처 패킷 기준:
-     *   client -> server HTTP request
+     * client -> server HTTP request
      *
      * client seq = ev->meta.seq
      * client ack = ev->meta.ack
@@ -310,14 +307,14 @@ void http_response_inject(const HttpEvent* ev, MYSQL* conn, long long log_id, in
         ) == 0)
     {
         send_ok = 1;
-        printf("%s 403 sent: log_id=%lld status=%d seq=%u ack=%u\n",
+        fprintf(stderr, "%s 403 sent: log_id=%lld status=%d seq=%u ack=%u\n",
                INJECT_LOG_PREFIX,
                log_id,
                final_status_code,
                srv_seq_for_403,
                srv_ack_for_403);
     } else {
-        printf("%s 403 sent failed: log_id=%lld errno=%d\n",
+        fprintf(stderr, "%s 403 send failed: log_id=%lld errno=%d\n",
                INJECT_LOG_PREFIX,
                log_id,
                err_403_1);
@@ -325,7 +322,7 @@ void http_response_inject(const HttpEvent* ev, MYSQL* conn, long long log_id, in
 
     /*
      * STEP 1-1) optional extra 403 retry
-     * 같은 seq/ack로 한 번 더 전송해서 표시 성공률을 약간 높인다.
+     * 같은 seq/ack로 한 번 더 전송해서 표시 성공률을 보완
      */
     if (enable_extra_403_retry) {
         if (send_forged_tcp(
@@ -341,14 +338,14 @@ void http_response_inject(const HttpEvent* ev, MYSQL* conn, long long log_id, in
             ) == 0)
         {
             send_ok = 1;
-            printf("%s 403 retry sent: log_id=%lld status=%d seq=%u ack=%u\n",
+            fprintf(stderr, "%s 403 retry sent: log_id=%lld status=%d seq=%u ack=%u\n",
                    INJECT_LOG_PREFIX,
                    log_id,
                    final_status_code,
                    srv_seq_for_403,
                    srv_ack_for_403);
         } else {
-            printf("%s 403 retry failed: log_id=%lld errno=%d\n",
+            fprintf(stderr, "%s 403 retry failed: log_id=%lld errno=%d\n",
                    INJECT_LOG_PREFIX,
                    log_id,
                    err_403_2);
@@ -357,7 +354,7 @@ void http_response_inject(const HttpEvent* ev, MYSQL* conn, long long log_id, in
 
     /*
      * STEP 2) server -> client RST
-     * forged 403 이후 브라우저 방향 세션을 종료
+     * 403 이후 브라우저 방향 세션 정리
      */
     if (send_forged_tcp_repeat(
             ev->meta.server_ip_nbo, ev->meta.client_ip_nbo,
@@ -372,14 +369,14 @@ void http_response_inject(const HttpEvent* ev, MYSQL* conn, long long log_id, in
         ) == 0)
     {
         send_ok = 1;
-        printf("%s rst_s2c: log_id=%lld seq=%u ack=%u repeat=%d\n",
+        fprintf(stderr, "%s rst_s2c: log_id=%lld seq=%u ack=%u repeat=%d\n",
                INJECT_LOG_PREFIX,
                log_id,
                srv_seq_after_403,
                srv_ack_for_403,
                rst_repeat_count);
     } else {
-        printf("%s rst_s2c failed: log_id=%lld errno=%d repeat=%d\n",
+        fprintf(stderr, "%s rst_s2c failed: log_id=%lld errno=%d repeat=%d\n",
                INJECT_LOG_PREFIX,
                log_id,
                err_rst_s2c,
@@ -388,7 +385,7 @@ void http_response_inject(const HttpEvent* ev, MYSQL* conn, long long log_id, in
 
     /*
      * STEP 3) client -> server RST
-     * 대상 서버 측 세션도 빠르게 정리
+     * 대상 서버 측 세션도 정리
      */
     if (send_forged_tcp_repeat(
             ev->meta.client_ip_nbo, ev->meta.server_ip_nbo,
@@ -403,14 +400,14 @@ void http_response_inject(const HttpEvent* ev, MYSQL* conn, long long log_id, in
         ) == 0)
     {
         send_ok = 1;
-        printf("%s rst_c2s: log_id=%lld seq=%u ack=%u repeat=%d\n",
+        fprintf(stderr, "%s rst_c2s: log_id=%lld seq=%u ack=%u repeat=%d\n",
                INJECT_LOG_PREFIX,
                log_id,
                req_end,
                cli_ack,
                rst_repeat_count);
     } else {
-        printf("%s rst_c2s failed: log_id=%lld errno=%d repeat=%d\n",
+        fprintf(stderr, "%s rst_c2s failed: log_id=%lld errno=%d repeat=%d\n",
                INJECT_LOG_PREFIX,
                log_id,
                err_rst_c2s,
@@ -437,7 +434,7 @@ void http_response_inject(const HttpEvent* ev, MYSQL* conn, long long log_id, in
                              latency,
                              final_status_code);
 
-    printf("%s summary: log_id=%lld 403_1=%s 403_2=%s rst_s2c=%s rst_c2s=%s final_ok=%d errno=%d rst_repeat=%d latency_ms=%d\n",
+    fprintf(stderr, "%s summary: log_id=%lld 403_1=%s 403_2=%s rst_s2c=%s rst_c2s=%s final_ok=%d errno=%d rst_repeat=%d latency_ms=%d\n",
            INJECT_LOG_PREFIX,
            log_id,
            (err_403_1 == 0 ? "ok" : "fail"),
