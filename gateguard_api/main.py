@@ -153,13 +153,14 @@ def _safe_send_policy_alert(
         pass
 
 
-def _get_system_health_snapshot() -> Dict[str, str]:
+def _get_system_health_snapshot() -> Dict[str, Optional[str]]:
     def check_service(service: str) -> str:
         try:
             result = subprocess.run(
                 ["systemctl", "is-active", service],
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=2,
             )
             return result.stdout.strip() or "unknown"
         except Exception:
@@ -176,13 +177,28 @@ def _get_system_health_snapshot() -> Dict[str, str]:
     model_file = os.path.join(model_dir, "model.pkl")
     meta_file = os.path.join(model_dir, "meta.json")
 
-    ai_model = "loaded" if os.path.exists(model_file) and os.path.exists(meta_file) else "missing"
+    artifacts_exist = os.path.exists(model_file) and os.path.exists(meta_file)
+
+    ai_model = "missing"
+    model_version = None
+
+    if artifacts_exist:
+        try:
+            version = get_model_version()
+            if version and str(version).strip():
+                model_version = str(version).strip()
+                ai_model = "running"
+            else:
+                ai_model = "error"
+        except Exception:
+            ai_model = "error"
 
     return {
         "engine": engine,
         "fastapi": fastapi,
         "mariadb": mariadb,
         "ai_model": ai_model,
+        "model_version": model_version,
     }
 
 
@@ -2882,7 +2898,7 @@ def system_health():
         "fastapi": snapshot["fastapi"],
         "mariadb": snapshot["mariadb"],
         "ai_model": snapshot["ai_model"],
-        "model_version": get_model_version() if snapshot["ai_model"] == "loaded" else None,
+        "model_version": snapshot["model_version"],
     }
 
 @app.get("/v1/logs/{log_id}")

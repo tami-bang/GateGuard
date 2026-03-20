@@ -186,17 +186,18 @@ function getEventHref(item: RecentEvent): string {
 function normalizeHealthLabel(value: string | null | undefined): string {
   const v = String(value || "").toLowerCase()
 
+  if (!v) return "UNKNOWN"
   if (v === "active") return "RUNNING"
   if (v === "inactive") return "STOPPED"
   if (v === "failed") return "FAILED"
-  if (v === "activating") return "STARTING"
-  if (v === "deactivating") return "STOPPING"
-  if (v === "loaded") return "RUNNING"
+  if (v === "running") return "RUNNING"
+  if (v === "error") return "ERROR"
   if (v === "missing") return "MISSING"
+  if (v === "loaded") return "RUNNING"
+  if (v === "unknown") return "UNKNOWN"
 
-  return "UNKNOWN"
+  return v.toUpperCase()
 }
-
 const chartTooltipStyle = {
   fontSize: 11,
   borderRadius: 10,
@@ -258,11 +259,15 @@ function getHealthBadgeClass(status: string): string {
     return "border-emerald-200 bg-emerald-50 text-emerald-700"
   }
 
-  if (v === "FAILED" || v === "STOPPED" || v === "MISSING") {
+  if (v === "STOPPED") {
+    return "border-amber-200 bg-amber-50 text-amber-700"
+  }
+  
+  if (v === "FAILED" || v === "ERROR" || v === "MISSING") {
     return "border-red-200 bg-red-50 text-red-700"
   }
 
-  return "border-amber-200 bg-amber-50 text-amber-700"
+  return "border-slate-200 bg-slate-50 text-slate-700"
 }
 
 function getSeverityInfo(item: RecentEvent): { label: string; className: string } {
@@ -612,6 +617,11 @@ export default function DashboardPage() {
       {
         label: "AI Model",
         value: normalizeHealthLabel(health?.ai_model),
+        icon: Cpu,
+      },
+      {
+        label: "Model Version",
+        value: health?.model_version || "-",
         icon: Cpu,
       },
     ]
