@@ -1,12 +1,8 @@
 #!/usr/bin/env bash
-
 set -u
 
 TARGET_URL="${TARGET_URL:-http://192.168.1.24:8080}"
-LOOPS="${LOOPS:-3}"
-SLEEP_SEC="${SLEEP_SEC:-1}"
-CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-3}"
-MAX_TIME="${MAX_TIME:-5}"
+PROFILE="default"
 
 PASS_HOST="${PASS_HOST:-good.example.com}"
 PASS_PATH="${PASS_PATH:-/}"
@@ -20,90 +16,125 @@ AI_PATH="${AI_PATH:-/gg-ai-test}"
 FAIL_HOST="${FAIL_HOST:-aitest.gateguard.local}"
 FAIL_PATH="${FAIL_PATH:-/score-check}"
 
-SHOW_BODY="${SHOW_BODY:-0}"
-RUN_FAIL_STAGE="${RUN_FAIL_STAGE:-0}"
+RUN_FAIL_STAGE=0
+LOOPS=3
+SLEEP_SEC=1
 
-log() {
-    printf '[TRAFFIC_GEN] %s\n' "$1"
+usage() {
+    cat <<EOF
+Usage:
+  $0 [--profile workhours|lunch|afterhours|default]
+
+Examples:
+  $0
+  $0 --profile workhours
+  TARGET_URL=http://192.168.1.24:8080 $0 --profile lunch
+EOF
 }
 
-run_curl() {
-    local label="$1"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --profile)
+            PROFILE="${2:-default}"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "[TRAFFIC_GEN] unknown argument: $1" >&2
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+case "$PROFILE" in
+    workhours)
+        LOOPS=4
+        SLEEP_SEC=1
+        RUN_FAIL_STAGE=0
+        ;;
+    lunch)
+        LOOPS=1
+        SLEEP_SEC=2
+        RUN_FAIL_STAGE=0
+        ;;
+    afterhours)
+        LOOPS=2
+        SLEEP_SEC=2
+        RUN_FAIL_STAGE=1
+        ;;
+    default)
+        LOOPS=3
+        SLEEP_SEC=1
+        RUN_FAIL_STAGE=0
+        ;;
+    *)
+        echo "[TRAFFIC_GEN] invalid profile: $PROFILE" >&2
+        exit 1
+        ;;
+esac
+
+timestamp() {
+    date '+%Y-%m-%d %H:%M:%S'
+}
+
+run_request() {
+    local stage="$1"
     local host="$2"
     local path="$3"
 
-    local url="${TARGET_URL}${path}"
-    local tmp_body
-    tmp_body="$(mktemp)"
+    local code
+    local total
 
-    log "request=${label} host=${host} path=${path}"
+    echo "[$(timestamp)] [TRAFFIC_GEN] request=${stage} host=${host} path=${path}"
 
-    if curl -sS \
-        --connect-timeout "${CONNECT_TIMEOUT}" \
-        --max-time "${MAX_TIME}" \
+    code="$(curl -sS -o /dev/null \
+        -w '%{http_code}' \
         -H "Host: ${host}" \
-        -o "${tmp_body}" \
-        -w "[TRAFFIC_GEN] result=${label} http_code=%{http_code} time_total=%{time_total}\n" \
-        "${url}"
-    then
-        :
-    else
-        log "curl failed for ${label}"
+        "${TARGET_URL}${path}" 2>/tmp/gateguard_traffic_err.$$)"
+    local curl_rc=$?
+
+    total="$(curl -sS -o /dev/null \
+        -w '%{time_total}' \
+        -H "Host: ${host}" \
+        "${TARGET_URL}${path}" 2>/dev/null)"
+    local time_rc=$?
+
+    if [[ $curl_rc -ne 0 || $time_rc -ne 0 ]]; then
+        echo "[$(timestamp)] [TRAFFIC_GEN] result=${stage} status=ERROR curl_rc=${curl_rc} detail=$(tr '\n' ' ' < /tmp/gateguard_traffic_err.$$)"
+        rm -f /tmp/gateguard_traffic_err.$$
+        return 1
     fi
 
-    if [ "${SHOW_BODY}" = "1" ]; then
-        printf '%s\n' "----- body (${label}) -----"
-        cat "${tmp_body}"
-        printf '\n%s\n' "---------------------------"
+    rm -f /tmp/gateguard_traffic_err.$$
+    echo "[$(timestamp)] [TRAFFIC_GEN] result=${stage} http_code=${code} time_total=${total}"
+    return 0
+}
+
+echo "[$(timestamp)] [TRAFFIC_GEN] start profile=${PROFILE} target=${TARGET_URL} loops=${LOOPS} sleep=${SLEEP_SEC}s"
+echo "[$(timestamp)] [TRAFFIC_GEN] pass=${PASS_HOST}${PASS_PATH} block=${BLOCK_HOST}${BLOCK_PATH} ai=${AI_HOST}${AI_PATH} fail=${FAIL_HOST}${FAIL_PATH} run_fail_stage=${RUN_FAIL_STAGE}"
+
+for ((i=1; i<=LOOPS; i++)); do
+    echo "[$(timestamp)] [TRAFFIC_GEN] loop=${i}/${LOOPS} begin"
+
+    run_request "PASS"  "$PASS_HOST"  "$PASS_PATH"
+    sleep "${SLEEP_SEC}"
+
+    run_request "BLOCK" "$BLOCK_HOST" "$BLOCK_PATH"
+    sleep "${SLEEP_SEC}"
+
+    run_request "AI"    "$AI_HOST"    "$AI_PATH"
+    sleep "${SLEEP_SEC}"
+
+    if [[ "${RUN_FAIL_STAGE}" -eq 1 ]]; then
+        run_request "FAIL"  "$FAIL_HOST"  "$FAIL_PATH"
+        sleep "${SLEEP_SEC}"
     fi
 
-    rm -f "${tmp_body}"
-}
+    echo "[$(timestamp)] [TRAFFIC_GEN] loop=${i}/${LOOPS} end"
+done
 
-run_pass_set() {
-    run_curl "PASS" "${PASS_HOST}" "${PASS_PATH}"
-}
-
-run_block_set() {
-    run_curl "BLOCK" "${BLOCK_HOST}" "${BLOCK_PATH}"
-}
-
-run_ai_set() {
-    run_curl "AI" "${AI_HOST}" "${AI_PATH}"
-}
-
-run_fail_set() {
-    run_curl "FAIL_STAGE" "${FAIL_HOST}" "${FAIL_PATH}"
-}
-
-main() {
-    local i=1
-
-    log "start target=${TARGET_URL} loops=${LOOPS} sleep=${SLEEP_SEC}s"
-    log "pass=${PASS_HOST}${PASS_PATH} block=${BLOCK_HOST}${BLOCK_PATH} ai=${AI_HOST}${AI_PATH} fail=${FAIL_HOST}${FAIL_PATH} run_fail_stage=${RUN_FAIL_STAGE}"
-
-    while [ "${i}" -le "${LOOPS}" ]; do
-        log "loop=${i}/${LOOPS} begin"
-
-        run_pass_set
-        sleep "${SLEEP_SEC}"
-
-        run_block_set
-        sleep "${SLEEP_SEC}"
-
-        run_ai_set
-        sleep "${SLEEP_SEC}"
-
-        if [ "${RUN_FAIL_STAGE}" = "1" ]; then
-            run_fail_set
-            sleep "${SLEEP_SEC}"
-        fi
-
-        log "loop=${i}/${LOOPS} end"
-        i=$((i + 1))
-    done
-
-    log "done"
-}
-
-main "$@"
+echo "[$(timestamp)] [TRAFFIC_GEN] done profile=${PROFILE}"

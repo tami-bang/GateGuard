@@ -1,6 +1,6 @@
 "use client"
 
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from "react"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import Link from "next/link"
 
@@ -92,7 +92,7 @@ type LogsCachePayload = {
 type QuickFilterItem = {
   key: string
   label: string
-  icon: React.ComponentType<{ className?: string }>
+  icon: ComponentType<{ className?: string }>
   onClick: () => void
 }
 
@@ -1006,6 +1006,52 @@ function LogsPageInner() {
       <Card className="border border-[#E5E7EB] bg-white shadow-sm">
         <CardContent className="flex flex-wrap items-end gap-3 p-3">
           <div className="flex flex-col gap-1">
+            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Start</label>
+            <Input
+              type="datetime-local"
+              value={filters.startTime}
+              onChange={(e) => updateFilter("startTime", e.target.value)}
+              className="h-8 w-[190px] text-xs"
+            />
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">End</label>
+            <Input
+              type="datetime-local"
+              value={filters.endTime}
+              onChange={(e) => updateFilter("endTime", e.target.value)}
+              className="h-8 w-[190px] text-xs"
+            />
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Client IP</label>
+            <div className="relative">
+              <Search className="absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                placeholder="Search client IP..."
+                value={filters.clientIp}
+                onChange={(e) => updateFilter("clientIp", e.target.value)}
+                className="h-8 w-[220px] pl-7 text-xs"
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Host</label>
+            <div className="relative">
+              <Search className="absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                placeholder="Search host..."
+                value={filters.host}
+                onChange={(e) => updateFilter("host", e.target.value)}
+                className="h-8 w-[220px] pl-7 text-xs"
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-1">
             <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Decision</label>
             <Select value={filters.decision} onValueChange={(v) => updateFilter("decision", v)}>
               <SelectTrigger className="h-8 w-[130px] text-xs">
@@ -1034,52 +1080,6 @@ function LogsPageInner() {
                 <SelectItem value="FAIL_STAGE">Fail Stage</SelectItem>
               </SelectContent>
             </Select>
-          </div>
-
-          <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Host</label>
-            <div className="relative">
-              <Search className="absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                placeholder="Search host..."
-                value={filters.host}
-                onChange={(e) => updateFilter("host", e.target.value)}
-                className="h-8 w-[220px] pl-7 text-xs"
-              />
-            </div>
-          </div>
-
-          <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Client IP</label>
-            <div className="relative">
-              <Search className="absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                placeholder="Search client IP..."
-                value={filters.clientIp}
-                onChange={(e) => updateFilter("clientIp", e.target.value)}
-                className="h-8 w-[220px] pl-7 text-xs"
-              />
-            </div>
-          </div>
-
-          <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Start</label>
-            <Input
-              type="datetime-local"
-              value={filters.startTime}
-              onChange={(e) => updateFilter("startTime", e.target.value)}
-              className="h-8 w-[190px] text-xs"
-            />
-          </div>
-
-          <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">End</label>
-            <Input
-              type="datetime-local"
-              value={filters.endTime}
-              onChange={(e) => updateFilter("endTime", e.target.value)}
-              className="h-8 w-[190px] text-xs"
-            />
           </div>
 
           <div className="flex flex-col gap-1">

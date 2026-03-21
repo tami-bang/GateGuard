@@ -6,9 +6,12 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation"
 
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { StatusChip } from "@/components/status-chip"
+import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 
 import {
@@ -20,7 +23,7 @@ import {
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb"
 
-import { AlertTriangle, Clock3, CheckCircle2, ArrowRight, Download } from "lucide-react"
+import { AlertTriangle, Clock3, CheckCircle2, ArrowRight, Download, X, Search } from "lucide-react"
 
 import {
   apiListIncidents,
@@ -31,6 +34,8 @@ import {
 } from "@/lib/api-client"
 
 type IncidentStatusTab = "OPEN" | "IN_PROGRESS" | "CLOSED"
+type ProposalFilter = "all" | "CREATE_POLICY" | "NO_ACTION" | "BLOCK" | "ALLOW"
+type GeneratedPolicyFilter = "all" | "has" | "none"
 
 type SummaryCardItem = {
   label: string
@@ -57,8 +62,18 @@ type SessionCacheEnvelope<T> = {
   data: T
 }
 
-type IncidentsUrlState = {
+type FiltersState = {
+  startTime: string
+  endTime: string
+  logId: string
   status: IncidentStatusTab
+  reviewer: string
+  proposed: ProposalFilter
+  generatedPolicy: GeneratedPolicyFilter
+}
+
+type IncidentsUrlState = {
+  filters: FiltersState
   page: number
 }
 
@@ -66,6 +81,16 @@ const PAGE_SIZE = 10
 const CACHE_TTL_MS = 45_000
 const SUMMARY_CACHE_KEY = "gateguard:incidents:summary"
 const EXPORT_BATCH_SIZE = 500
+
+const INITIAL_FILTERS: FiltersState = {
+  startTime: "",
+  endTime: "",
+  logId: "",
+  status: "OPEN",
+  reviewer: "",
+  proposed: "all",
+  generatedPolicy: "all",
+}
 
 function readSessionCache<T>(key: string): T | null {
   if (typeof window === "undefined") return null
@@ -196,11 +221,109 @@ function normalizePageParam(value: string | null): number {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1
 }
 
-function buildIncidentsQuery(status: IncidentStatusTab, page: number): string {
+function normalizeProposalParam(value: string | null): ProposalFilter {
+  if (
+    value === "CREATE_POLICY" ||
+    value === "NO_ACTION" ||
+    value === "BLOCK" ||
+    value === "ALLOW"
+  ) {
+    return value
+  }
+
+  return "all"
+}
+
+function normalizeGeneratedPolicyParam(value: string | null): GeneratedPolicyFilter {
+  if (value === "has" || value === "none") return value
+  return "all"
+}
+
+function buildIncidentsQuery(filters: FiltersState, page: number): string {
   const qs = new URLSearchParams()
-  if (status !== "OPEN") qs.set("status", status)
+
+  if (filters.status !== "OPEN") qs.set("status", filters.status)
+  if (filters.startTime) qs.set("start_time", filters.startTime)
+  if (filters.endTime) qs.set("end_time", filters.endTime)
+  if (filters.logId.trim()) qs.set("log_id", filters.logId.trim())
+  if (filters.reviewer.trim()) qs.set("reviewer", filters.reviewer.trim())
+  if (filters.proposed !== "all") qs.set("proposed", filters.proposed)
+  if (filters.generatedPolicy !== "all") qs.set("generated_policy", filters.generatedPolicy)
   if (page > 1) qs.set("page", String(page))
+
   return qs.toString()
+}
+
+function isSameFilters(a: FiltersState, b: FiltersState): boolean {
+  return (
+    a.startTime === b.startTime &&
+    a.endTime === b.endTime &&
+    a.logId === b.logId &&
+    a.status === b.status &&
+    a.reviewer === b.reviewer &&
+    a.proposed === b.proposed &&
+    a.generatedPolicy === b.generatedPolicy
+  )
+}
+
+function toDateInputValue(ts: string | null | undefined): number | null {
+  if (!ts) return null
+  const d = new Date(ts)
+  if (Number.isNaN(d.getTime())) return null
+  return d.getTime()
+}
+
+function incidentMatchesFilters(rev: ReviewEvent, filters: FiltersState): boolean {
+  const createdAt = toDateInputValue(rev.created_at)
+
+  if (filters.startTime) {
+    const start = new Date(filters.startTime).getTime()
+    if (!Number.isNaN(start) && (createdAt === null || createdAt < start)) {
+      return false
+    }
+  }
+
+  if (filters.endTime) {
+    const end = new Date(filters.endTime).getTime()
+    if (!Number.isNaN(end) && (createdAt === null || createdAt > end)) {
+      return false
+    }
+  }
+
+  if (filters.logId.trim()) {
+    const logIdText = String(rev.log_id ?? "").toLowerCase()
+    if (!logIdText.includes(filters.logId.trim().toLowerCase())) {
+      return false
+    }
+  }
+
+  if (String(rev.status || "").toUpperCase() !== filters.status) {
+    return false
+  }
+
+  if (filters.reviewer.trim()) {
+    const reviewerText = String(rev.reviewer_id ?? "").toLowerCase()
+    if (!reviewerText.includes(filters.reviewer.trim().toLowerCase())) {
+      return false
+    }
+  }
+  
+  if (filters.proposed !== "all") {
+    const proposedAction = String(rev.proposed_action || "").toUpperCase()
+    if (proposedAction !== filters.proposed) {
+      return false
+    }
+  }
+
+  if (filters.generatedPolicy === "has" && !rev.generated_policy_id) {
+    return false
+  }
+
+  if (filters.generatedPolicy === "none" && rev.generated_policy_id) {
+    return false
+  }
+
+  return true
 }
 
 export default function IncidentsPage() {
@@ -208,12 +331,10 @@ export default function IncidentsPage() {
   const pathname = usePathname()
   const searchParams = useSearchParams()
 
-  const [activeTab, setActiveTab] = useState<IncidentStatusTab>("OPEN")
+  const [filters, setFilters] = useState<FiltersState>(INITIAL_FILTERS)
   const [page, setPage] = useState(1)
 
-  const [items, setItems] = useState<ReviewEvent[]>([])
-  const [total, setTotal] = useState(0)
-
+  const [allItemsForStatus, setAllItemsForStatus] = useState<ReviewEvent[]>([])
   const [summaryCounts, setSummaryCounts] = useState<Record<IncidentStatusTab, number>>({
     OPEN: 0,
     IN_PROGRESS: 0,
@@ -238,11 +359,20 @@ export default function IncidentsPage() {
   }, [summaryCounts])
 
   useEffect(() => {
-    const nextStatus = normalizeStatusParam(searchParams.get("status"))
+    const nextFilters: FiltersState = {
+      startTime: searchParams.get("start_time") ?? "",
+      endTime: searchParams.get("end_time") ?? "",
+      logId: searchParams.get("log_id") ?? "",
+      status: normalizeStatusParam(searchParams.get("status")),
+      reviewer: searchParams.get("reviewer") ?? "",
+      proposed: normalizeProposalParam(searchParams.get("proposed")),
+      generatedPolicy: normalizeGeneratedPolicyParam(searchParams.get("generated_policy")),
+    }
+
     const nextPage = normalizePageParam(searchParams.get("page"))
 
     const snapshot = JSON.stringify({
-      status: nextStatus,
+      filters: nextFilters,
       page: nextPage,
     })
 
@@ -253,12 +383,12 @@ export default function IncidentsPage() {
 
     lastUrlSnapshotRef.current = snapshot
 
-    setActiveTab((prev) => (prev === nextStatus ? prev : nextStatus))
+    setFilters((prev) => (isSameFilters(prev, nextFilters) ? prev : nextFilters))
     setPage((prev) => (prev === nextPage ? prev : nextPage))
     didHydrateFromUrl.current = true
   }, [searchParams])
 
-  const listQueryString = useMemo(() => buildIncidentsQuery(activeTab, page), [activeTab, page])
+  const listQueryString = useMemo(() => buildIncidentsQuery(filters, page), [filters, page])
 
   const currentListHref = useMemo(() => {
     return listQueryString ? `${pathname}?${listQueryString}` : pathname
@@ -268,13 +398,12 @@ export default function IncidentsPage() {
 
   const syncUrl = useCallback(
     (nextState: IncidentsUrlState) => {
-      const nextQuery = buildIncidentsQuery(nextState.status, nextState.page)
+      const nextQuery = buildIncidentsQuery(nextState.filters, nextState.page)
       const nextHref = nextQuery ? `${pathname}?${nextQuery}` : pathname
       const currentQuery = searchParams.toString()
       const currentHref = currentQuery ? `${pathname}?${currentQuery}` : pathname
 
       if (nextHref === currentHref) return
-
       router.replace(nextHref, { scroll: false })
     },
     [pathname, router, searchParams]
@@ -288,8 +417,7 @@ export default function IncidentsPage() {
       return
     }
 
-    setItems(cached.payload.items ?? [])
-    setTotal(cached.payload.total ?? 0)
+    setAllItemsForStatus(cached.payload.items ?? [])
 
     if (cached.payload.summaryCounts) {
       setSummaryCounts(cached.payload.summaryCounts)
@@ -351,10 +479,7 @@ export default function IncidentsPage() {
     }
   }, [])
 
-  const requestKey = useMemo(
-    () => JSON.stringify({ status: activeTab, page, sort: "created_at", dir: "desc", limit: PAGE_SIZE }),
-    [activeTab, page]
-  )
+  const requestKey = useMemo(() => JSON.stringify({ status: filters.status, fetch: "all" }), [filters.status])
 
   useEffect(() => {
     let alive = true
@@ -381,24 +506,40 @@ export default function IncidentsPage() {
 
         setError("")
 
-        const res = await apiListIncidents({
-          status: activeTab,
-          limit: PAGE_SIZE,
-          page,
+        const first = await apiListIncidents({
+          status: filters.status,
+          limit: EXPORT_BATCH_SIZE,
+          page: 1,
           sort: "created_at",
           dir: "desc",
         })
 
         if (!alive) return
 
-        setItems(res.items ?? [])
-        setTotal(res.total ?? 0)
+        let allItems = [...(first.items ?? [])]
+        const exportTotal = first.total ?? allItems.length
+
+        for (let nextPage = 2; allItems.length < exportTotal; nextPage += 1) {
+          const batch = await apiListIncidents({
+            status: filters.status,
+            limit: EXPORT_BATCH_SIZE,
+            page: nextPage,
+            sort: "created_at",
+            dir: "desc",
+          })
+
+          if (!alive) return
+          if (!batch.items?.length) break
+          allItems = allItems.concat(batch.items)
+        }
+
+        setAllItemsForStatus(allItems)
         didInitialLoad.current = true
         lastFetchedRequestKeyRef.current = requestKey
 
         const cached: IncidentListCache = {
-          items: res.items ?? [],
-          total: res.total ?? 0,
+          items: allItems,
+          total: allItems.length,
           summaryCounts: summaryCountsRef.current,
         }
 
@@ -421,17 +562,51 @@ export default function IncidentsPage() {
     return () => {
       alive = false
     }
-  }, [activeTab, page, cacheKey, requestKey])
+  }, [filters.status, cacheKey, requestKey])
 
   function commitState(nextState: IncidentsUrlState) {
-    setActiveTab(nextState.status)
+    setFilters(nextState.filters)
     setPage(nextState.page)
     syncUrl(nextState)
   }
 
+  function updateFilter<K extends keyof FiltersState>(key: K, value: FiltersState[K]) {
+    const nextFilters = {
+      ...filters,
+      [key]: value,
+    }
+
+    commitState({
+      filters: nextFilters,
+      page: 1,
+    })
+  }
+
+  function clearFilters() {
+    commitState({
+      filters: {
+        ...INITIAL_FILTERS,
+        status: filters.status,
+      },
+      page: 1,
+    })
+  }
+
+  const filteredItems = useMemo(() => {
+    return allItemsForStatus.filter((rev) => incidentMatchesFilters(rev, filters))
+  }, [allItemsForStatus, filters])
+
+  const total = filteredItems.length
+
   const totalPages = useMemo(() => {
     return Math.max(1, Math.ceil(total / PAGE_SIZE))
   }, [total])
+
+  const normalizedPage = Math.min(page, totalPages)
+  const pagedItems = useMemo(() => {
+    const start = (normalizedPage - 1) * PAGE_SIZE
+    return filteredItems.slice(start, start + PAGE_SIZE)
+  }, [filteredItems, normalizedPage])
 
   const summaryCards = useMemo<SummaryCardItem[]>(
     () => [
@@ -463,40 +638,84 @@ export default function IncidentsPage() {
     [summaryCounts]
   )
 
-  const pageStart = total === 0 ? 0 : (page - 1) * PAGE_SIZE + 1
-  const pageEnd = Math.min(page * PAGE_SIZE, total)
+  const pageStart = total === 0 ? 0 : (normalizedPage - 1) * PAGE_SIZE + 1
+  const pageEnd = Math.min(normalizedPage * PAGE_SIZE, total)
+
+  const activeFilterCount =
+    (filters.startTime ? 1 : 0) +
+    (filters.endTime ? 1 : 0) +
+    (filters.logId.trim() ? 1 : 0) +
+    1 +
+    (filters.reviewer.trim() ? 1 : 0) +
+    (filters.proposed !== "all" ? 1 : 0) +
+    (filters.generatedPolicy !== "all" ? 1 : 0)
+
+  const activeFilterPills = useMemo(() => {
+    const pills: Array<{ key: string; label: string; onRemove?: () => void }> = [
+      {
+        key: "status",
+        label: `Status: ${filters.status}`,
+      },
+    ]
+
+    if (filters.startTime) {
+      pills.push({
+        key: "startTime",
+        label: `Start: ${filters.startTime}`,
+        onRemove: () => updateFilter("startTime", ""),
+      })
+    }
+
+    if (filters.endTime) {
+      pills.push({
+        key: "endTime",
+        label: `End: ${filters.endTime}`,
+        onRemove: () => updateFilter("endTime", ""),
+      })
+    }
+
+    if (filters.logId.trim()) {
+      pills.push({
+        key: "logId",
+        label: `Log ID: ${filters.logId.trim()}`,
+        onRemove: () => updateFilter("logId", ""),
+      })
+    }
+
+    if (filters.reviewer.trim()) {
+      pills.push({
+        key: "reviewer",
+        label: `Reviewer: ${filters.reviewer.trim()}`,
+        onRemove: () => updateFilter("reviewer", ""),
+      })
+    }
+
+    if (filters.proposed !== "all") {
+      pills.push({
+        key: "proposed",
+        label: `Proposed Action: ${filters.proposed.replace(/_/g, " ")}`,
+        onRemove: () => updateFilter("proposed", "all"),
+      })
+    }
+
+    if (filters.generatedPolicy !== "all") {
+      pills.push({
+        key: "generatedPolicy",
+        label: `Generated Policy: ${filters.generatedPolicy === "has" ? "Generated" : "Not Generated"}`,
+        onRemove: () => updateFilter("generatedPolicy", "all"),
+      })
+    }
+
+    return pills
+  }, [filters])
 
   async function handleExportCsv() {
     try {
       setExportLoading(true)
       setError("")
 
-      const first = await apiListIncidents({
-        status: activeTab,
-        limit: EXPORT_BATCH_SIZE,
-        page: 1,
-        sort: "created_at",
-        dir: "desc",
-      })
-
-      let allItems = [...(first.items ?? [])]
-      const exportTotal = first.total ?? allItems.length
-
-      for (let nextPage = 2; allItems.length < exportTotal; nextPage += 1) {
-        const batch = await apiListIncidents({
-          status: activeTab,
-          limit: EXPORT_BATCH_SIZE,
-          page: nextPage,
-          sort: "created_at",
-          dir: "desc",
-        })
-
-        if (!batch.items?.length) break
-        allItems = allItems.concat(batch.items)
-      }
-
-      const csv = buildIncidentsCsv(allItems)
-      const filename = `gateguard_incidents_${activeTab.toLowerCase()}_${formatLocalDateTimeForFile()}.csv`
+      const csv = buildIncidentsCsv(filteredItems)
+      const filename = `gateguard_incidents_${filters.status.toLowerCase()}_${formatLocalDateTimeForFile()}.csv`
       downloadCsvFile(filename, csv)
     } catch (e: any) {
       setError(e?.message || "Failed to export incidents CSV")
@@ -523,7 +742,7 @@ export default function IncidentsPage() {
         <div>
           <h1 className="text-xl font-semibold text-[#111827]">Incidents (Review Queue)</h1>
           <p className="text-sm text-[#6B7280]">
-            {initialLoading ? "Loading incidents..." : `${activeTab.replace("_", " ")} · ${total.toLocaleString()} total`}
+            {initialLoading ? "Loading incidents..." : `${filters.status.replace("_", " ")} · ${total.toLocaleString()} filtered`}
           </p>
         </div>
 
@@ -538,6 +757,25 @@ export default function IncidentsPage() {
             <Download className="mr-1 size-3.5" />
             {exportLoading ? "Exporting..." : "Export CSV"}
           </Button>
+
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 text-xs transition-all duration-200"
+            onClick={clearFilters}
+            disabled={
+              filters.startTime === "" &&
+              filters.endTime === "" &&
+              filters.logId.trim() === "" &&
+              filters.reviewer.trim() === "" &&
+              filters.proposed === "all" &&
+              filters.generatedPolicy === "all" &&
+              page === 1
+            }
+          >
+            <X className="mr-1 size-3.5" />
+            Reset
+          </Button>
         </div>
       </div>
 
@@ -547,9 +785,9 @@ export default function IncidentsPage() {
         </div>
       ) : null}
 
-	  <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         {summaryCards.map((item) => {
-          const isActive = activeTab === item.status
+          const isActive = filters.status === item.status
 
           return (
             <Card
@@ -558,7 +796,10 @@ export default function IncidentsPage() {
               tabIndex={0}
               onClick={() =>
                 commitState({
-                  status: item.status,
+                  filters: {
+                    ...filters,
+                    status: item.status,
+                  },
                   page: 1,
                 })
               }
@@ -566,17 +807,18 @@ export default function IncidentsPage() {
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault()
                   commitState({
-                    status: item.status,
+                    filters: {
+                      ...filters,
+                      status: item.status,
+                    },
                     page: 1,
                   })
                 }
               }}
               className={cn(
-                "relative overflow-hidden rounded-2xl border bg-white shadow-sm transition-all duration-200 cursor-pointer",
-				"hover:-translate-y-0.5 hover:shadow-md",
-                isActive
-				  ? "border-[#BFDBFE] bg-[#F8FBFF] shadow-md"
-				  : "border-[#E5E7EB] hover:border-[#D6E4FF]"
+                "relative cursor-pointer overflow-hidden rounded-2xl border bg-white shadow-sm transition-all duration-200",
+                "hover:-translate-y-0.5 hover:shadow-md",
+                isActive ? "border-[#BFDBFE] bg-[#F8FBFF] shadow-md" : "border-[#E5E7EB] hover:border-[#D6E4FF]"
               )}
             >
               <div className={cn("h-1 w-full bg-gradient-to-r", item.accentClass)} />
@@ -591,19 +833,17 @@ export default function IncidentsPage() {
                   </div>
 
                   <ArrowRight
-                    className={cn(
-                      "size-4 transition-colors",
-                      isActive ? "text-[#2563EB]" : "text-[#9CA3AF]"
-                    )}
-                  /> 
+                    className={cn("size-4 transition-colors", isActive ? "text-[#2563EB]" : "text-[#9CA3AF]")}
+                  />
                 </div>
 
                 <div className="flex flex-col gap-1">
-                  <span className={cn(
-				    "text-2xl font-bold tracking-tight transition-colors",
-					isActive ? "text-[#1E3A8A]" : "text-[#111827]"
-				  )}
-				>
+                  <span
+                    className={cn(
+                      "text-2xl font-bold tracking-tight transition-colors",
+                      isActive ? "text-[#1E3A8A]" : "text-[#111827]"
+                    )}
+                  >
                     {summaryLoading ? "…" : item.value.toLocaleString()}
                   </span>
                   <span className="text-[11px] text-[#9CA3AF]">{item.subText}</span>
@@ -615,10 +855,13 @@ export default function IncidentsPage() {
       </div>
 
       <Tabs
-        value={activeTab}
+        value={filters.status}
         onValueChange={(value) => {
           commitState({
-            status: value as IncidentStatusTab,
+            filters: {
+              ...filters,
+              status: value as IncidentStatusTab,
+            },
             page: 1,
           })
         }}
@@ -645,6 +888,135 @@ export default function IncidentsPage() {
             </span>
           </TabsTrigger>
         </TabsList>
+
+        <Card className="border border-[#E5E7EB] bg-white shadow-sm">
+          <CardContent className="flex flex-wrap items-end gap-3 p-3">
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Start</label>
+              <Input
+                type="datetime-local"
+                value={filters.startTime}
+                onChange={(e) => updateFilter("startTime", e.target.value)}
+                className="h-8 w-[190px] text-xs"
+              />
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">End</label>
+              <Input
+                type="datetime-local"
+                value={filters.endTime}
+                onChange={(e) => updateFilter("endTime", e.target.value)}
+                className="h-8 w-[190px] text-xs"
+              />
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Log ID</label>
+              <div className="relative">
+                <Search className="absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  placeholder="Search log ID..."
+                  value={filters.logId}
+                  onChange={(e) => updateFilter("logId", e.target.value)}
+                  className="h-8 w-[180px] pl-7 text-xs"
+                />
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Status</label>
+              <Select value={filters.status} onValueChange={(v) => updateFilter("status", v as IncidentStatusTab)}>
+                <SelectTrigger className="h-8 w-[150px] text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="OPEN">Open</SelectItem>
+                  <SelectItem value="IN_PROGRESS">In Progress</SelectItem>
+                  <SelectItem value="CLOSED">Closed</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Reviewer</label>
+              <div className="relative">
+                <Search className="absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  placeholder="Search reviewer..."
+                  value={filters.reviewer}
+                  onChange={(e) => updateFilter("reviewer", e.target.value)}
+                  className="h-8 w-[190px] pl-7 text-xs"
+                />
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Proposed</label>
+              <Select value={filters.proposed} onValueChange={(v) => updateFilter("proposed", v as ProposalFilter)}>
+                <SelectTrigger className="h-8 w-[150px] text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All</SelectItem>
+                  <SelectItem value="CREATE_POLICY">Create Policy</SelectItem>
+                  <SelectItem value="NO_ACTION">No Action</SelectItem>
+				  <SelectItem value="BLOCK">Block</SelectItem>
+				  <SelectItem value="ALLOW">Allow</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <label className="text-[11px] font-medium uppercase tracking-wider text-[#6B7280]">Generated Policy</label>
+              <Select
+                value={filters.generatedPolicy}
+                onValueChange={(v) => updateFilter("generatedPolicy", v as GeneratedPolicyFilter)}
+              >
+                <SelectTrigger className="h-8 w-[160px] text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All</SelectItem>
+                  <SelectItem value="has">Generated</SelectItem>
+                  <SelectItem value="none">Not Generated</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="ml-auto flex items-center gap-2">
+              <div className="text-xs text-[#6B7280]">
+                {activeFilterCount > 0 ? `${activeFilterCount} filter(s)` : "No filters"}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {activeFilterPills.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="text-xs font-medium text-[#6B7280]">Active Filters</div>
+
+            {activeFilterPills.map((pill) => (
+              <Badge
+                key={pill.key}
+                variant="outline"
+                className="gap-1 rounded-md border-[#CBD5E1] bg-white px-2 py-1 text-[11px] font-normal text-[#334155]"
+              >
+                {pill.label}
+                {pill.onRemove ? (
+                  <button
+                    type="button"
+                    onClick={pill.onRemove}
+                    className="inline-flex items-center text-[#6B7280] transition-colors hover:text-[#111827]"
+                    aria-label={`Remove ${pill.label}`}
+                  >
+                    <X className="size-3" />
+                  </button>
+                ) : null}
+              </Badge>
+            ))}
+          </div>
+        ) : null}
 
         {initialLoading ? (
           <Card className="overflow-hidden border border-[#E5E7EB] bg-white shadow-sm">
@@ -677,14 +1049,14 @@ export default function IncidentsPage() {
                   </TableHeader>
 
                   <TableBody>
-                    {!tableLoading && items.length === 0 ? (
+                    {!tableLoading && pagedItems.length === 0 ? (
                       <TableRow>
                         <TableCell colSpan={7} className="py-8 text-center text-sm text-[#6B7280]">
-                          No incidents with status {activeTab.replace("_", " ")}
+                          No incidents matched the current filters.
                         </TableCell>
                       </TableRow>
                     ) : (
-                      items.map((rev) => {
+                      pagedItems.map((rev) => {
                         const incidentDetailHref = `/incidents/${rev.review_id}?returnTo=${encodeURIComponent(currentListHref)}`
                         const logDetailHref = `/logs/${rev.log_id}?returnTo=${encodeURIComponent(currentListHref)}`
 
@@ -764,11 +1136,11 @@ export default function IncidentsPage() {
                 <Button
                   variant="outline"
                   size="sm"
-                  disabled={page <= 1 || tableLoading}
+                  disabled={normalizedPage <= 1 || tableLoading}
                   onClick={() =>
                     commitState({
-                      status: activeTab,
-                      page: Math.max(1, page - 1),
+                      filters,
+                      page: Math.max(1, normalizedPage - 1),
                     })
                   }
                 >
@@ -776,17 +1148,17 @@ export default function IncidentsPage() {
                 </Button>
 
                 <span className="min-w-[88px] text-center text-xs text-[#6B7280]">
-                  Page {page} / {totalPages}
+                  Page {normalizedPage} / {totalPages}
                 </span>
 
                 <Button
                   variant="outline"
                   size="sm"
-                  disabled={page >= totalPages || tableLoading}
+                  disabled={normalizedPage >= totalPages || tableLoading}
                   onClick={() =>
                     commitState({
-                      status: activeTab,
-                      page: Math.min(totalPages, page + 1),
+                      filters,
+                      page: Math.min(totalPages, normalizedPage + 1),
                     })
                   }
                 >

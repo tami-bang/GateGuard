@@ -6,6 +6,7 @@ import Link from "next/link"
 
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
@@ -34,10 +35,12 @@ const riskColors: Record<string, string> = {
 }
 
 type FiltersState = {
+  name: string
   type: string
   action: string
-  enabled: string
+  status: string
   riskLevel: string
+  category: string
 }
 
 type PoliciesUrlState = {
@@ -59,10 +62,12 @@ type PoliciesCachePayload = {
 }
 
 const INITIAL_FILTERS: FiltersState = {
+  name: "",
   type: "all",
   action: "all",
-  enabled: "all",
+  status: "all",
   riskLevel: "all",
+  category: "all",
 }
 
 function formatDate(v: string | null): string {
@@ -114,6 +119,10 @@ function normalizePage(value: string | null): number {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1
 }
 
+function normalizeName(value: string | null): string {
+  return value?.trim() ?? ""
+}
+
 function normalizeType(value: string | null): string {
   if (!value) return "all"
   return ["ALLOWLIST", "BLOCKLIST", "MONITOR"].includes(value) ? value : "all"
@@ -124,7 +133,7 @@ function normalizeAction(value: string | null): string {
   return ["ALLOW", "BLOCK", "REDIRECT", "REVIEW"].includes(value) ? value : "all"
 }
 
-function normalizeEnabled(value: string | null): string {
+function normalizeStatus(value: string | null): string {
   if (!value) return "all"
   return value === "true" || value === "false" ? value : "all"
 }
@@ -134,22 +143,30 @@ function normalizeRiskLevel(value: string | null): string {
   return ["CRITICAL", "HIGH", "MEDIUM", "LOW"].includes(value) ? value : "all"
 }
 
+function normalizeCategory(value: string | null): string {
+  return value?.trim() || "all"
+}
+
 function isSameFilters(a: FiltersState, b: FiltersState): boolean {
   return (
+    a.name === b.name &&
     a.type === b.type &&
     a.action === b.action &&
-    a.enabled === b.enabled &&
-    a.riskLevel === b.riskLevel
+    a.status === b.status &&
+    a.riskLevel === b.riskLevel &&
+    a.category === b.category
   )
 }
 
 function buildPoliciesQuery(params: PoliciesUrlState): string {
   const qs = new URLSearchParams()
 
+  if (params.filters.name.trim()) qs.set("name", params.filters.name.trim())
   if (params.filters.type !== "all") qs.set("type", params.filters.type)
   if (params.filters.action !== "all") qs.set("action", params.filters.action)
-  if (params.filters.enabled !== "all") qs.set("enabled", params.filters.enabled)
+  if (params.filters.status !== "all") qs.set("status", params.filters.status)
   if (params.filters.riskLevel !== "all") qs.set("risk_level", params.filters.riskLevel)
+  if (params.filters.category !== "all") qs.set("category", params.filters.category)
   if (params.page > 1) qs.set("page", String(params.page))
 
   return qs.toString()
@@ -213,10 +230,12 @@ function PoliciesPageInner() {
 
   useEffect(() => {
     const nextFilters: FiltersState = {
+      name: normalizeName(searchParams.get("name")),
       type: normalizeType(searchParams.get("type")),
       action: normalizeAction(searchParams.get("action")),
-      enabled: normalizeEnabled(searchParams.get("enabled")),
+      status: normalizeStatus(searchParams.get("status")),
       riskLevel: normalizeRiskLevel(searchParams.get("risk_level")),
+      category: normalizeCategory(searchParams.get("category")),
     }
 
     const nextPage = normalizePage(searchParams.get("page"))
@@ -361,8 +380,23 @@ function PoliciesPageInner() {
     }
   }, [offset, cacheKey, requestKey])
 
+  const categoryOptions = useMemo(() => {
+    return Array.from(
+      new Set(
+        policies
+          .map((p) => (p.category ?? "").trim())
+          .filter((v) => v.length > 0)
+      )
+    ).sort((a, b) => a.localeCompare(b))
+  }, [policies])
+
   const filtered = useMemo(() => {
     let rows = [...policies]
+
+    if (filters.name.trim()) {
+      const keyword = filters.name.trim().toLowerCase()
+      rows = rows.filter((p) => (p.policy_name ?? "").toLowerCase().includes(keyword))
+    }
 
     if (filters.type !== "all") {
       rows = rows.filter((p) => p.policy_type === filters.type)
@@ -372,13 +406,17 @@ function PoliciesPageInner() {
       rows = rows.filter((p) => p.action === filters.action)
     }
 
-    if (filters.enabled !== "all") {
-      const wantEnabled = filters.enabled === "true"
+    if (filters.status !== "all") {
+      const wantEnabled = filters.status === "true"
       rows = rows.filter((p) => toBool(p.is_enabled) === wantEnabled)
     }
 
     if (filters.riskLevel !== "all") {
       rows = rows.filter((p) => (p.risk_level ?? "") === filters.riskLevel)
+    }
+
+    if (filters.category !== "all") {
+      rows = rows.filter((p) => (p.category ?? "").trim() === filters.category)
     }
 
     return rows.sort((a, b) => {
@@ -389,10 +427,12 @@ function PoliciesPageInner() {
   }, [policies, filters])
 
   const activeFilterCount =
+    (filters.name.trim() ? 1 : 0) +
     (filters.type !== "all" ? 1 : 0) +
     (filters.action !== "all" ? 1 : 0) +
-    (filters.enabled !== "all" ? 1 : 0) +
-    (filters.riskLevel !== "all" ? 1 : 0)
+    (filters.status !== "all" ? 1 : 0) +
+    (filters.riskLevel !== "all" ? 1 : 0) +
+    (filters.category !== "all" ? 1 : 0)
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
   const pageStart = total === 0 ? 0 : offset + 1
@@ -454,77 +494,110 @@ function PoliciesPageInner() {
       </div>
 
       <Card className="border shadow-sm">
-        <CardContent className="flex flex-wrap items-end gap-3 p-3">
-          <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">
-              Type
-            </label>
-            <Select value={filters.type} onValueChange={(v) => updateFilter("type", v)}>
-              <SelectTrigger className="h-8 w-[130px] text-xs">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All</SelectItem>
-                <SelectItem value="ALLOWLIST">Allowlist</SelectItem>
-                <SelectItem value="BLOCKLIST">Blocklist</SelectItem>
-                <SelectItem value="MONITOR">Monitor</SelectItem>
-              </SelectContent>
-            </Select>
+        <CardContent className="p-4">
+          <div className="grid grid-cols-1 gap-x-6 gap-y-3 md:grid-cols-2 xl:grid-cols-[minmax(220px,1.6fr)_repeat(5,minmax(120px,1fr))]">
+            <div className="flex min-w-0 flex-col gap-1">
+              <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                Name
+              </label>
+              <Input
+                value={filters.name}
+                onChange={(e) => updateFilter("name", e.target.value)}
+                placeholder="Search policy name"
+                className="h-8 text-xs"
+              />
+            </div>
+
+            <div className="flex min-w-0 flex-col gap-1">
+              <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                Type
+              </label>
+              <Select value={filters.type} onValueChange={(v) => updateFilter("type", v)}>
+                <SelectTrigger className="h-8 w-full text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All</SelectItem>
+                  <SelectItem value="ALLOWLIST">Allowlist</SelectItem>
+                  <SelectItem value="BLOCKLIST">Blocklist</SelectItem>
+                  <SelectItem value="MONITOR">Monitor</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="flex min-w-0 flex-col gap-1">
+              <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                Action
+              </label>
+              <Select value={filters.action} onValueChange={(v) => updateFilter("action", v)}>
+                <SelectTrigger className="h-8 w-full text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All</SelectItem>
+                  <SelectItem value="ALLOW">Allow</SelectItem>
+                  <SelectItem value="BLOCK">Block</SelectItem>
+                  <SelectItem value="REDIRECT">Redirect</SelectItem>
+                  <SelectItem value="REVIEW">Review</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="flex min-w-0 flex-col gap-1">
+              <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                Risk
+              </label>
+              <Select value={filters.riskLevel} onValueChange={(v) => updateFilter("riskLevel", v)}>
+                <SelectTrigger className="h-8 w-full text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All</SelectItem>
+                  <SelectItem value="CRITICAL">Critical</SelectItem>
+                  <SelectItem value="HIGH">High</SelectItem>
+                  <SelectItem value="MEDIUM">Medium</SelectItem>
+                  <SelectItem value="LOW">Low</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="flex min-w-0 flex-col gap-1">
+              <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                Category
+              </label>
+              <Select value={filters.category} onValueChange={(v) => updateFilter("category", v)}>
+                <SelectTrigger className="h-8 w-full text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All</SelectItem>
+                  {categoryOptions.map((category) => (
+                    <SelectItem key={category} value={category}>
+                      {category}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="flex min-w-0 flex-col gap-1">
+              <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                Status
+              </label>
+              <Select value={filters.status} onValueChange={(v) => updateFilter("status", v)}>
+                <SelectTrigger className="h-8 w-full text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All</SelectItem>
+                  <SelectItem value="true">Enabled</SelectItem>
+                  <SelectItem value="false">Disabled</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
           </div>
 
-          <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">
-              Action
-            </label>
-            <Select value={filters.action} onValueChange={(v) => updateFilter("action", v)}>
-              <SelectTrigger className="h-8 w-[120px] text-xs">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All</SelectItem>
-                <SelectItem value="ALLOW">Allow</SelectItem>
-                <SelectItem value="BLOCK">Block</SelectItem>
-                <SelectItem value="REDIRECT">Redirect</SelectItem>
-                <SelectItem value="REVIEW">Review</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">
-              Enabled
-            </label>
-            <Select value={filters.enabled} onValueChange={(v) => updateFilter("enabled", v)}>
-              <SelectTrigger className="h-8 w-[110px] text-xs">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All</SelectItem>
-                <SelectItem value="true">Enabled</SelectItem>
-                <SelectItem value="false">Disabled</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">
-              Risk
-            </label>
-            <Select value={filters.riskLevel} onValueChange={(v) => updateFilter("riskLevel", v)}>
-              <SelectTrigger className="h-8 w-[120px] text-xs">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All</SelectItem>
-                <SelectItem value="CRITICAL">Critical</SelectItem>
-                <SelectItem value="HIGH">High</SelectItem>
-                <SelectItem value="MEDIUM">Medium</SelectItem>
-                <SelectItem value="LOW">Low</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="ml-auto flex items-center gap-2">
+          <div className="mt-3 flex items-center justify-end gap-2">
             <div className="text-xs text-muted-foreground">
               {activeFilterCount > 0 ? `${activeFilterCount} filter(s)` : "No filters"}
             </div>
@@ -543,7 +616,7 @@ function PoliciesPageInner() {
         </CardContent>
       </Card>
 
-      <Card className="border shadow-sm overflow-hidden">
+      <Card className="overflow-hidden border shadow-sm">
         {error ? (
           <div className="p-4 text-sm text-red-600">{error}</div>
         ) : (
@@ -629,7 +702,7 @@ function PoliciesPageInner() {
                           <TableCell>
                             <Badge
                               variant={toBool(p.is_enabled) ? "default" : "secondary"}
-                              className={`text-[10px] ${toBool(p.is_enabled) ? "bg-success text-white border-0" : ""}`}
+                              className={`text-[10px] ${toBool(p.is_enabled) ? "bg-success border-0 text-white" : ""}`}
                             >
                               {toBool(p.is_enabled) ? "Enabled" : "Disabled"}
                             </Badge>
