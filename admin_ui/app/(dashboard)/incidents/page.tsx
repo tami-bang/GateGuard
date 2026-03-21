@@ -38,6 +38,7 @@ type SummaryCardItem = {
   icon: typeof AlertTriangle
   accentClass: string
   subText: string
+  status: IncidentStatusTab
 }
 
 type IncidentListCache = {
@@ -440,6 +441,7 @@ export default function IncidentsPage() {
         icon: AlertTriangle,
         accentClass: getSummaryAccent("OPEN"),
         subText: "Pending analyst attention",
+        status: "OPEN",
       },
       {
         label: "In Progress",
@@ -447,6 +449,7 @@ export default function IncidentsPage() {
         icon: Clock3,
         accentClass: getSummaryAccent("IN_PROGRESS"),
         subText: "Being reviewed or processed",
+        status: "IN_PROGRESS",
       },
       {
         label: "Closed",
@@ -454,6 +457,7 @@ export default function IncidentsPage() {
         icon: CheckCircle2,
         accentClass: getSummaryAccent("CLOSED"),
         subText: "Resolved review events",
+        status: "CLOSED",
       },
     ],
     [summaryCounts]
@@ -543,35 +547,71 @@ export default function IncidentsPage() {
         </div>
       ) : null}
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        {summaryCards.map((item) => (
-          <Card
-            key={item.label}
-            className="relative overflow-hidden border border-[#E5E7EB] bg-white shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md"
-          >
-            <div className={cn("h-1 w-full bg-gradient-to-r", item.accentClass)} />
+	  <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+        {summaryCards.map((item) => {
+          const isActive = activeTab === item.status
 
-            <CardContent className="flex flex-col gap-3 p-4">
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex items-center gap-2">
-                  <div className="rounded-md bg-slate-50 p-2">
-                    <item.icon className="size-4 text-[#1E3A8A]" />
+          return (
+            <Card
+              key={item.label}
+              role="button"
+              tabIndex={0}
+              onClick={() =>
+                commitState({
+                  status: item.status,
+                  page: 1,
+                })
+              }
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault()
+                  commitState({
+                    status: item.status,
+                    page: 1,
+                  })
+                }
+              }}
+              className={cn(
+                "relative overflow-hidden rounded-2xl border bg-white shadow-sm transition-all duration-200 cursor-pointer",
+				"hover:-translate-y-0.5 hover:shadow-md",
+                isActive
+				  ? "border-[#BFDBFE] bg-[#F8FBFF] shadow-md"
+				  : "border-[#E5E7EB] hover:border-[#D6E4FF]"
+              )}
+            >
+              <div className={cn("h-1 w-full bg-gradient-to-r", item.accentClass)} />
+
+              <CardContent className="flex flex-col gap-3 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <div className="rounded-md bg-slate-50 p-2">
+                      <item.icon className="size-4 text-[#1E3A8A]" />
+                    </div>
+                    <span className="text-xs font-medium text-[#6B7280]">{item.label}</span>
                   </div>
-                  <span className="text-xs font-medium text-[#6B7280]">{item.label}</span>
+
+                  <ArrowRight
+                    className={cn(
+                      "size-4 transition-colors",
+                      isActive ? "text-[#2563EB]" : "text-[#9CA3AF]"
+                    )}
+                  /> 
                 </div>
 
-                <ArrowRight className="size-4 text-[#9CA3AF]" />
-              </div>
-
-              <div className="flex flex-col gap-1">
-                <span className="text-2xl font-bold tracking-tight text-[#111827]">
-                  {summaryLoading ? "…" : item.value.toLocaleString()}
-                </span>
-                <span className="text-[11px] text-[#9CA3AF]">{item.subText}</span>
-              </div>
-            </CardContent>
-          </Card>
-        ))}
+                <div className="flex flex-col gap-1">
+                  <span className={cn(
+				    "text-2xl font-bold tracking-tight transition-colors",
+					isActive ? "text-[#1E3A8A]" : "text-[#111827]"
+				  )}
+				>
+                    {summaryLoading ? "…" : item.value.toLocaleString()}
+                  </span>
+                  <span className="text-[11px] text-[#9CA3AF]">{item.subText}</span>
+                </div>
+              </CardContent>
+            </Card>
+          )
+        })}
       </div>
 
       <Tabs
