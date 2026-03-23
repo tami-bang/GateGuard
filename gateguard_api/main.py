@@ -38,6 +38,7 @@ def load_env(path: str) -> None:
             os.environ.setdefault(k.strip(), v.strip())
 
 from gateguard_api.db import get_connection
+from fastapi.middleware.cors import CORSMiddleware
 
 def get_db_connection():
     return get_connection()
@@ -83,6 +84,10 @@ allowed_origins = _parse_csv(os.getenv("CORS_ORIGINS", "")) or [
     "http://192.168.1.24:8080",
     "http://localhost:8080",
     "http://127.0.0.1:8080",
+    "http://localhost:3000",    # local에서 putty 접속 후 adminui 확인하는 용도
+    "http://127.0.0.1:3000",    # local에서 putty 접속 후 adminui 확인하는 용도
+    "http://192.168.100.21:3000",
+    "http://192.168.100.22:3000",
 ]
 
 app.add_middleware(
