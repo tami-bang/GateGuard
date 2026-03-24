@@ -1079,6 +1079,51 @@ def resolve_review_event(review_id: int, req: ResolveReviewRequest, request: Req
         conn.autocommit(True)
         conn.close()
 
+# ============================================================
+# Policy Audit API (policy_audit)
+# - 정책 변경 이력 조회
+# - policy_id 기준으로 변경 로그 반환
+# - 생성/수정/삭제 이력 모두 포함
+# ============================================================
+
+@app.get("/v1/policies/{policy_id}/audit")
+def get_policy_audit(policy_id: int):
+    conn = get_db_connection()
+    try:
+        with conn.cursor(pymysql.cursors.DictCursor) as cur:
+
+            # 정책 존재 여부 확인 (안전장치)
+            cur.execute("SELECT policy_id FROM policy WHERE policy_id=%s", (policy_id,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="policy not found")
+
+            # policy_audit 조회 (최신순)
+            cur.execute("""
+                SELECT
+                    audit_id,
+                    policy_id,
+                    action,
+                    changed_by,
+                    changed_at,
+                    change_note,
+                    source_review_id,
+                    before_snapshot,
+                    after_snapshot
+                FROM policy_audit
+                WHERE policy_id = %s
+                ORDER BY changed_at DESC
+            """, (policy_id,))
+            rows = cur.fetchall()
+
+        return {
+            "policy_id": policy_id,
+            "audit_logs": rows,
+            "count": len(rows),
+        }
+
+    finally:
+        conn.close()
+
 # =========================
 # Policy creation normalization / noise filtering (P0)
 # =========================

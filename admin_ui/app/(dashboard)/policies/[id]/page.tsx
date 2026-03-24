@@ -147,10 +147,14 @@ function AuditDetailModal({
                     return (
                       <tr key={row.field} className="border-t align-top">
                         <td className="px-4 py-3 font-mono text-xs">{row.field}</td>
-                        <td className="px-4 py-3 text-xs text-foreground break-all">
+                        <td className="px-4 py-3 break-all text-xs text-foreground">
                           {row.before === null || row.before === undefined ? "—" : String(row.before)}
                         </td>
-                        <td className={`px-4 py-3 text-xs break-all ${changed ? "text-red-600 font-semibold" : "text-foreground"}`}>
+                        <td
+                          className={`px-4 py-3 break-all text-xs ${
+                            changed ? "font-semibold text-red-600" : "text-foreground"
+                          }`}
+                        >
                           {row.after === null || row.after === undefined ? "—" : String(row.after)}
                         </td>
                       </tr>
@@ -391,19 +395,19 @@ export default function PolicyDetailPage() {
           <CardContent>
             <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
               <div>
-                <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Type</dt>
+                <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Type</dt>
                 <dd className="mt-0.5"><StatusChip value={policy.policy_type} type="policyType" /></dd>
               </div>
               <div>
-                <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Action</dt>
+                <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Action</dt>
                 <dd className="mt-0.5"><StatusChip value={policy.action} /></dd>
               </div>
               <div>
-                <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Priority</dt>
+                <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Priority</dt>
                 <dd className="mt-0.5 text-xs font-mono font-semibold text-foreground">{policy.priority ?? "N/A"}</dd>
               </div>
               <div>
-                <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Risk Level</dt>
+                <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Risk Level</dt>
                 <dd className="mt-0.5">
                   <span className={`inline-flex rounded border px-1.5 py-0.5 text-[11px] font-semibold ${riskColors[policy.risk_level ?? ""] || ""}`}>
                     {policy.risk_level ?? "N/A"}
@@ -411,19 +415,19 @@ export default function PolicyDetailPage() {
                 </dd>
               </div>
               <div>
-                <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Category</dt>
+                <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Category</dt>
                 <dd className="mt-0.5 text-xs text-foreground">{policy.category ?? "N/A"}</dd>
               </div>
               <div>
-                <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Created By</dt>
+                <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Created By</dt>
                 <dd className="mt-0.5 text-xs text-foreground">{policy.created_by}</dd>
               </div>
               <div>
-                <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Created</dt>
+                <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Created</dt>
                 <dd className="mt-0.5 text-xs text-foreground">{fmtDate(policy.created_at)}</dd>
               </div>
               <div>
-                <dt className="text-[11px] font-medium text-muted-foreground uppercase tracking-wider">Last Updated</dt>
+                <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Last Updated</dt>
                 <dd className="mt-0.5 text-xs text-foreground">
                   {fmtDate(policy.updated_at)} {policy.updated_by ? `by ${policy.updated_by}` : ""}
                 </dd>
@@ -458,7 +462,7 @@ export default function PolicyDetailPage() {
         </Card>
       </div>
 
-      <Card className="border shadow-sm overflow-hidden">
+      <Card className="overflow-hidden border shadow-sm">
         <CardHeader className="pb-2">
           <CardTitle className="text-sm font-semibold text-foreground">Policy Rules ({rules.length})</CardTitle>
         </CardHeader>
@@ -492,7 +496,14 @@ export default function PolicyDetailPage() {
                   <TableCell className="max-w-[200px] truncate font-mono text-[11px] text-foreground">{rule.pattern}</TableCell>
                   <TableCell className="text-[11px]">{toBool(rule.is_case_sensitive) ? "Yes" : "No"}</TableCell>
                   <TableCell className="text-[11px]">{toBool(rule.is_negated) ? "Yes" : "No"}</TableCell>
-                  <TableCell><Switch checked={toBool(rule.is_enabled)} className="scale-75" /></TableCell>
+                  <TableCell>
+                    <Switch
+                      checked={toBool(rule.is_enabled)}
+                      disabled
+                      aria-label={`rule-${rule.rule_id}-enabled`}
+                      className="scale-75"
+                    />
+                  </TableCell>
                 </TableRow>
               ))
             )}
@@ -500,7 +511,7 @@ export default function PolicyDetailPage() {
         </Table>
       </Card>
 
-      <Card className="border shadow-sm overflow-hidden">
+      <Card className="overflow-hidden border shadow-sm">
         <CardHeader className="pb-2">
           <CardTitle className="text-sm font-semibold text-foreground">
             Audit History ({audits.length})
