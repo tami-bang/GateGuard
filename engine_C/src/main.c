@@ -14,12 +14,16 @@
 #include <sys/time.h>
 #include <uuid/uuid.h>
 #include <mysql/mysql.h>
+#include <ctype.h>
 
 #define ENGINE_LOG_PREFIX "[ENGINE]"
 #define POLICY_LOG_PREFIX "[POLICY]"
 #define AI_LOG_PREFIX     "[AI]"
 #define INJECT_LOG_PREFIX "[INJECT]"
 #define ERROR_LOG_PREFIX  "[ERROR]"
+
+#define ALLOW_CACHE_SIZE 1024
+#define ALLOW_CACHE_TTL_MS 5000
 
 /*
  * GateGuard Engine main flow
@@ -34,8 +38,8 @@
  *
  * 3) policy match 결과 처리
  *    - BLOCK  -> 즉시 403 + RST injection 후 decision 반영
- *    - ALLOW  -> access_log decision 갱신
- *    - REVIEW -> access_log decision 갱신
+ *    - ALLOW  -> access_log decision 갱신 후 즉시 종료
+ *    - REVIEW -> access_log decision 갱신 후 즉시 종료
  *
  * 4) policy 미매칭 시 AI scoring
  *    - FastAPI /v1/score 호출
@@ -43,15 +47,20 @@
  *    - FAIL_STAGE fallback 처리
  *
  * 5) AI 최종 판단 처리
- *    - BLOCK  -> 즉시 inject 후 decision 갱신
- *    - ALLOW  -> decision 갱신
- *    - REVIEW -> decision 갱신
+ *    - BLOCK  -> 즉시 inject 후 decision 반영
+ *    - ALLOW  -> decision 반영
+ *    - REVIEW -> decision 반영
  *
  * 주의:
  * 이 엔진은 OOB(out-of-band) 스니핑 기반 구조이므로
  * forged 403가 항상 원본 서버 응답보다 먼저 도달한다고 보장되지는 않는다.
  * 다만 inject를 최대한 앞당겨 선행 가능성을 높인다.
  */
+
+typedef struct {
+    char ip[64];
+    int64_t ts;
+} allow_cache_entry_t;
 
 /* ------------------------- */
 /* runtime config helpers    */
@@ -132,6 +141,106 @@ static const char* safe_str(const char* s)
     return (s && s[0]) ? s : "-";
 }
 
+/*
+ * 정책 매칭용 host 정규화
+ * - 소문자 변환
+ * - host:port 형태면 port 제거
+ * - trailing dot 제거 (example.com.)
+ * - 공백 제거
+ *
+ * access_log에는 원본 host를 그대로 남기고,
+ * match_policy()에만 정규화 host를 사용한다.
+ */
+static void normalize_host_for_policy(const char* in, char* out, size_t outsz)
+{
+    size_t i = 0;
+    size_t j = 0;
+
+    if (!out || outsz == 0) return;
+    out[0] = '\0';
+
+    if (!in || !in[0]) return;
+
+    while (in[i] && isspace((unsigned char)in[i])) {
+        i++;
+    }
+
+    while (in[i] && !isspace((unsigned char)in[i]) && j + 1 < outsz) {
+        out[j++] = (char)tolower((unsigned char)in[i]);
+        i++;
+    }
+    out[j] = '\0';
+
+    if (out[0] != '[') {
+        char* colon = strrchr(out, ':');
+        if (colon) {
+            int all_digits = 1;
+            char* p = colon + 1;
+
+            if (*p == '\0') {
+                all_digits = 0;
+            } else {
+                while (*p) {
+                    if (!isdigit((unsigned char)*p)) {
+                        all_digits = 0;
+                        break;
+                    }
+                    p++;
+                }
+            }
+
+            if (all_digits) {
+                *colon = '\0';
+            }
+        }
+    }
+
+    while (j > 0 && out[0] != '\0') {
+        size_t len = strlen(out);
+        if (len == 0) break;
+        if (out[len - 1] != '.') break;
+        out[len - 1] = '\0';
+        j = len - 1;
+    }
+}
+
+static int is_ipv4_literal_host(const char* host)
+{
+    int dots = 0;
+    int digits_in_octet = 0;
+    int octet_value = 0;
+
+    if (!host || !host[0]) return 0;
+
+    for (size_t i = 0; host[i]; i++) {
+        unsigned char ch = (unsigned char)host[i];
+
+        if (isdigit(ch)) {
+            octet_value = octet_value * 10 + (ch - '0');
+            digits_in_octet++;
+            if (octet_value > 255) return 0;
+            if (digits_in_octet > 3) return 0;
+            continue;
+        }
+
+        if (ch == '.') {
+            if (digits_in_octet == 0) return 0;
+            dots++;
+            if (dots > 3) return 0;
+            octet_value = 0;
+            digits_in_octet = 0;
+            continue;
+        }
+
+        return 0;
+    }
+
+    if (dots != 3) return 0;
+    if (digits_in_octet == 0) return 0;
+
+    return 1;
+}
+
 static const char* action_to_text(action_t action)
 {
     switch (action) {
@@ -197,7 +306,10 @@ static int is_internal_admin_host(const char* host)
         strcasecmp(host, "192.168.1.24") == 0 ||
         strcasecmp(host, "localhost:8080") == 0 ||
         strcasecmp(host, "127.0.0.1:8080") == 0 ||
-        strcasecmp(host, "192.168.1.24:8080") == 0
+        strcasecmp(host, "192.168.1.24:8080") == 0 ||
+        strcasecmp(host, "localhost:3000") == 0 ||
+        strcasecmp(host, "127.0.0.1:3000") == 0 ||
+        strcasecmp(host, "192.168.1.24:3000") == 0
     );
 }
 
@@ -248,11 +360,10 @@ static int is_dev_ai_test_request(const HttpEvent* ev)
     if (!ev) return 0;
     if (!ev->path) return 0;
 
-    /*
-     * 데모용 테스트 요청은 8080으로 들어오더라도 noise 제외 대상이 아니다.
-     * 외부 Windows -> VM 테스트에서도 그대로 통과되어야 한다.
-     */
-    if ((int)ev->meta.server_port != 8080) return 0;
+    if ((int)ev->meta.server_port != 8080 &&
+        (int)ev->meta.server_port != 3000) {
+        return 0;
+    }
 
     return (
         strcmp(ev->path, "/score-check") == 0 ||
@@ -289,19 +400,11 @@ static int is_internal_admin_request(const HttpEvent* ev)
 {
     if (!ev) return 0;
 
-    /*
-     * 외부 정상 웹사이트 트래픽도 8080으로 들어올 수 있으므로
-     * server_port만으로 admin 요청으로 보면 안 된다.
-     *
-     * 아래 중 하나면 admin 성격 요청으로 본다.
-     * 1) Host header가 내부 admin host
-     * 2) 8080으로 들어왔고 path가 admin/next 내부 요청 형태
-     */
     if (is_internal_admin_host(ev->host)) {
         return 1;
     }
 
-    if ((int)ev->meta.server_port == 8080 &&
+    if (((int)ev->meta.server_port == 8080 || (int)ev->meta.server_port == 3000) &&
         (is_internal_admin_path(ev->path) || is_next_internal_request(ev->path))) {
         return 1;
     }
@@ -321,10 +424,6 @@ static int should_skip_noise_event(const HttpEvent* ev)
         return 0;
     }
 
-    /*
-     * 외부 정상 사이트의 /login, /favicon.ico, /_next/, _rsc 요청까지
-     * 전역 제외하면 안 되므로 admin 성격이 확인된 요청만 skip
-     */
     if (is_internal_admin_request(ev) && is_admin_noise_path(ev->path)) {
         return 1;
     }
@@ -343,6 +442,88 @@ static int should_bypass_policy_for_ai_test(const HttpEvent* ev)
 
 static MYSQL* g_conn = NULL;
 static policy_cache_t g_cache;
+static allow_cache_entry_t g_allow_cache[ALLOW_CACHE_SIZE];
+
+/* ------------------------- */
+/* allow inheritance cache   */
+/* ------------------------- */
+
+static void allow_cache_put(const char* ip)
+{
+    int64_t now = now_ms();
+    int empty_idx = -1;
+    int oldest_idx = -1;
+
+    if (!ip || !ip[0]) return;
+
+    for (int i = 0; i < ALLOW_CACHE_SIZE; i++) {
+        if (g_allow_cache[i].ip[0] == '\0') {
+            if (empty_idx < 0) empty_idx = i;
+            continue;
+        }
+
+        if (strcmp(g_allow_cache[i].ip, ip) == 0) {
+            g_allow_cache[i].ts = now;
+            return;
+        }
+
+        if (oldest_idx < 0 || g_allow_cache[i].ts < g_allow_cache[oldest_idx].ts) {
+            oldest_idx = i;
+        }
+    }
+
+    if (empty_idx >= 0) {
+        strncpy(g_allow_cache[empty_idx].ip, ip, sizeof(g_allow_cache[empty_idx].ip) - 1);
+        g_allow_cache[empty_idx].ip[sizeof(g_allow_cache[empty_idx].ip) - 1] = '\0';
+        g_allow_cache[empty_idx].ts = now;
+        return;
+    }
+
+    if (oldest_idx >= 0) {
+        strncpy(g_allow_cache[oldest_idx].ip, ip, sizeof(g_allow_cache[oldest_idx].ip) - 1);
+        g_allow_cache[oldest_idx].ip[sizeof(g_allow_cache[oldest_idx].ip) - 1] = '\0';
+        g_allow_cache[oldest_idx].ts = now;
+    }
+}
+
+static int allow_cache_hit(const char* ip)
+{
+    int64_t now = now_ms();
+
+    if (!ip || !ip[0]) return 0;
+
+    for (int i = 0; i < ALLOW_CACHE_SIZE; i++) {
+        if (g_allow_cache[i].ip[0] == '\0') continue;
+
+        if (strcmp(g_allow_cache[i].ip, ip) != 0) continue;
+
+        if ((now - g_allow_cache[i].ts) <= ALLOW_CACHE_TTL_MS) {
+            return 1;
+        }
+
+        g_allow_cache[i].ip[0] = '\0';
+        g_allow_cache[i].ts = 0;
+        return 0;
+    }
+
+    return 0;
+}
+
+/*
+ * inheritance 적용 범위 제한
+ * - 현재 OOB 구조에서는 client_ip 기준 inheritance가 필요하지만
+ * - 모든 host에 적용하면 kakao.com 같은 정상 도메인까지
+ *   POLICY hit 대신 ALLOW_CACHE로 흘러가며 과도하게 넓어진다.
+ * - 그래서 "IPv4 literal host" 후속 요청에만 inheritance를 적용한다.
+ */
+static int should_apply_allow_inheritance(const HttpEvent* ev)
+{
+    if (!ev) return 0;
+    if (!ev->host || !ev->host[0]) return 0;
+    if (!allow_cache_hit(ev->meta.client_ip)) return 0;
+
+    return is_ipv4_literal_host(ev->host);
+}
 
 /* ------------------------- */
 /* DB 연결                   */
@@ -497,9 +678,42 @@ void engine_handle_http_event(const HttpEvent* ev)
             request_id,
             log_id);
 
+    /*
+     * ALLOW inheritance
+     * - client_ip 기준 캐시가 있어도
+     * - 모든 host에 적용하지 않고
+     * - IPv4 literal host 후속 리소스 요청에만 적용
+     */
+    if (should_apply_allow_inheritance(ev)) {
+        update_access_log_decision(
+            g_conn,
+            log_id,
+            "ALLOW",
+            "INHERIT",
+            "POLICY_STAGE",
+            0,
+            calc_engine_latency_ms(ev)
+        );
+
+        log_engine_decision(ev, "ALLOW", "POLICY_STAGE", "ALLOW_CACHE");
+        return;
+    }
+
+    char normalized_host[512];
+    memset(normalized_host, 0, sizeof(normalized_host));
+    normalize_host_for_policy(ev->host, normalized_host, sizeof(normalized_host));
+
+    fprintf(stderr,
+            "%s policy input log_id=%lld raw_host=%s normalized_host=%s path=%s\n",
+            POLICY_LOG_PREFIX,
+            log_id,
+            safe_str(ev->host),
+            safe_str(normalized_host),
+            safe_str(ev->path));
+
     policy_decision_t d =
         match_policy(&g_cache,
-                     ev->host,
+                     normalized_host[0] ? normalized_host : ev->host,
                      ev->path,
                      ev->url_norm);
 
@@ -509,22 +723,16 @@ void engine_handle_http_event(const HttpEvent* ev)
 
     if (d.matched) {
         fprintf(stderr,
-                "%s matched log_id=%lld policy_id=%lld action=%s host=%s path=%s\n",
+                "%s matched log_id=%lld policy_id=%lld action=%s raw_host=%s normalized_host=%s path=%s\n",
                 POLICY_LOG_PREFIX,
                 log_id,
                 d.policy_id,
                 action_to_text(d.action),
                 safe_str(ev->host),
+                safe_str(normalized_host),
                 safe_str(ev->path));
 
         if (d.action == ACT_BLOCK) {
-            /*
-             * POLICY BLOCK fast path
-             * - access_log row는 이미 생성됨
-             * - policy 기반 차단은 AI/후처리 없이 즉시 inject 가능
-             * - 403 선점 가능성을 조금이라도 높이기 위해
-             *   inject를 decision/update보다 먼저 수행
-             */
             http_response_inject(ev, g_conn, log_id, d.block_status_code);
 
             update_access_log_decision(
@@ -543,6 +751,13 @@ void engine_handle_http_event(const HttpEvent* ev)
         }
 
         if (d.action == ACT_ALLOW) {
+            /*
+             * POLICY ALLOW hit 시
+             * 동일 client_ip의 IP literal 후속 리소스를 보호하기 위해
+             * allow cache 적재
+             */
+            allow_cache_put(ev->meta.client_ip);
+
             update_access_log_decision(
                 g_conn,
                 log_id,
@@ -552,15 +767,12 @@ void engine_handle_http_event(const HttpEvent* ev)
                 d.policy_id,
                 calc_engine_latency_ms(ev)
             );
+
             log_engine_decision(ev, "ALLOW", "POLICY_STAGE", "POLICY");
             return;
         }
 
         if (d.action == ACT_REDIRECT) {
-            /*
-             * 현재 엔진은 redirect injection 미구현 상태이므로
-             * REVIEW로 다운그레이드 처리
-             */
             update_access_log_decision(
                 g_conn,
                 log_id,
@@ -589,10 +801,11 @@ void engine_handle_http_event(const HttpEvent* ev)
         }
 
         fprintf(stderr,
-                "%s matched policy but unknown action=%s host=%s path=%s\n",
+                "%s matched policy but unknown action=%s raw_host=%s normalized_host=%s path=%s\n",
                 ENGINE_LOG_PREFIX,
                 action_to_text(d.action),
                 safe_str(ev->host),
+                safe_str(normalized_host),
                 safe_str(ev->path));
     }
 
@@ -682,11 +895,6 @@ void engine_handle_http_event(const HttpEvent* ev)
             safe_str(ev->path));
 
     if (final == ACT_BLOCK) {
-        /*
-         * AI BLOCK fast path
-         * - 최종 판정이 끝난 즉시 inject 우선
-         * - decision/update 및 review_event는 그 다음
-         */
         http_response_inject(ev, g_conn, log_id, GG_DEFAULT_BLOCK_STATUS_CODE);
 
         update_access_log_decision(
@@ -702,6 +910,11 @@ void engine_handle_http_event(const HttpEvent* ev)
         log_engine_decision(ev, "BLOCK", "AI_STAGE", "AI");
     }
     else if (final == ACT_ALLOW) {
+        /*
+         * AI ALLOW도 동일 client_ip 후속 IP literal 요청 보호를 위해 cache 적재
+         */
+        allow_cache_put(ev->meta.client_ip);
+
         update_access_log_decision(
             g_conn,
             log_id,
@@ -758,6 +971,8 @@ int main(int argc, char** argv)
             db_user,
             db_name,
             score_endpoint);
+
+    memset(g_allow_cache, 0, sizeof(g_allow_cache));
 
     g_conn = db_connect();
 

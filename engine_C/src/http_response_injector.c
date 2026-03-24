@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <strings.h>
 #include <sys/time.h>
+#include <unistd.h>
 
 #include <netinet/tcp.h>
 #ifndef TH_PUSH
@@ -25,7 +26,12 @@ typedef struct {
     int enable_extra_403_retry;
 } inject_runtime_cfg_t;
 
-static inject_runtime_cfg_t g_inject_cfg = {0, 1, 0};
+/*
+ * 기본값:
+ * - RST 5회
+ * - 403 재전송 1회 활성화
+ */
+static inject_runtime_cfg_t g_inject_cfg = {0, 5, 1};
 
 static int now_ms(void)
 {
@@ -52,23 +58,43 @@ static int env_flag_enabled(const char* key, int defval)
     return defval;
 }
 
+static int env_int_or_default(const char* key, int defval, int minval, int maxval)
+{
+    const char* v = getenv(key);
+    long parsed;
+    char* endptr = NULL;
+
+    if (!v || !v[0]) return defval;
+
+    errno = 0;
+    parsed = strtol(v, &endptr, 10);
+    if (errno != 0 || endptr == v || *endptr != '\0') {
+        return defval;
+    }
+
+    if ((int)parsed < minval) return minval;
+    if ((int)parsed > maxval) return maxval;
+    return (int)parsed;
+}
+
 static void load_inject_runtime_cfg_once(void)
 {
     if (g_inject_cfg.initialized) return;
 
     /*
-     * GG_INJECT_RST_REPEAT=1  -> RST 2회 전송
-     * 기본값                 -> RST 1회 전송
+     * GG_INJECT_RST_REPEAT=<n>
+     * - 기본값: 5
+     * - 허용 범위: 1 ~ 10
      */
     g_inject_cfg.rst_repeat_count =
-        env_flag_enabled("GG_INJECT_RST_REPEAT", 0) ? 2 : 1;
+        env_int_or_default("GG_INJECT_RST_REPEAT", 5, 1, 10);
 
     /*
      * GG_INJECT_403_RETRY=1  -> 403 1회 추가 재전송
-     * 기본값                -> 비활성화
+     * 기본값                -> 활성화
      */
     g_inject_cfg.enable_extra_403_retry =
-        env_flag_enabled("GG_INJECT_403_RETRY", 0) ? 1 : 0;
+        env_flag_enabled("GG_INJECT_403_RETRY", 1) ? 1 : 0;
 
     g_inject_cfg.initialized = 1;
 }
