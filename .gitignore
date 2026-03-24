@@ -68,3 +68,6 @@ ai_trainer/artifacts/
 
 # dataset
 ai_trainer/data/
+
+# csv
+*.csv
