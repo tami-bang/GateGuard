@@ -23,11 +23,9 @@ gg_memmem(const unsigned char* haystack,
     if (haystack_len < needle_len) return NULL;
 
     size_t last = haystack_len - needle_len;
-    for (size_t i = 0; i <= last; i++)
-    {
+    for (size_t i = 0; i <= last; i++) {
         if (haystack[i] == needle[0] &&
-            memcmp(haystack + i, needle, needle_len) == 0)
-        {
+            memcmp(haystack + i, needle, needle_len) == 0) {
             return haystack + i;
         }
     }
@@ -36,14 +34,15 @@ gg_memmem(const unsigned char* haystack,
 
 static int starts_with_method(const unsigned char* p, size_t len)
 {
-    if (len < 4) return 0;
+    if (!p || len < 4) return 0;
+
     return (
-        memcmp(p, "GET ", 4)  == 0 ||
-        memcmp(p, "POST", 4)  == 0 ||
-        memcmp(p, "HEAD", 4)  == 0 ||
-        memcmp(p, "PUT ", 4)  == 0 ||
-        memcmp(p, "DELE", 4)  == 0 ||
-        memcmp(p, "OPTI", 4)  == 0
+        (len >= 4 && memcmp(p, "GET ", 4)  == 0) ||
+        (len >= 5 && memcmp(p, "POST ", 5) == 0) ||
+        (len >= 5 && memcmp(p, "HEAD ", 5) == 0) ||
+        (len >= 4 && memcmp(p, "PUT ", 4)  == 0) ||
+        (len >= 7 && memcmp(p, "DELETE ", 7) == 0) ||
+        (len >= 8 && memcmp(p, "OPTIONS ", 8) == 0)
     );
 }
 
@@ -51,14 +50,9 @@ static int looks_like_http_request(const unsigned char* payload, size_t len)
 {
     if (!payload || len == 0) return 0;
 
-    if (starts_with_method(payload, len))
-        return 1;
-
-    if (gg_memmem(payload, len, (const unsigned char*)"Host:", 5))
-        return 1;
-
-    if (gg_memmem(payload, len, (const unsigned char*)"\r\nHost:", 7))
-        return 1;
+    if (starts_with_method(payload, len)) return 1;
+    if (gg_memmem(payload, len, (const unsigned char*)"Host:", 5)) return 1;
+    if (gg_memmem(payload, len, (const unsigned char*)"\r\nHost:", 7)) return 1;
 
     return 0;
 }
@@ -93,7 +87,6 @@ static int parse_http_host_path_method(const unsigned char* payload,
 
     const unsigned char* line_end =
         gg_memmem(payload, payload_len, (const unsigned char*)"\r\n", 2);
-
     if (!line_end) return 0;
 
     size_t line_len = (size_t)(line_end - payload);
@@ -104,13 +97,14 @@ static int parse_http_host_path_method(const unsigned char* payload,
     line[line_len] = '\0';
 
     char method[16] = {0};
-    char path[512]  = {0};
+    char path[512] = {0};
 
-    if (sscanf(line, "%15s %511s", method, path) != 2)
+    if (sscanf(line, "%15s %511s", method, path) != 2) {
         return 0;
+    }
 
     snprintf(out_method, method_sz, "%s", method);
-    snprintf(out_path,   path_sz,   "%s", path);
+    snprintf(out_path, path_sz, "%s", path);
 
     const unsigned char* host_pos = find_host_header(payload, payload_len);
     if (!host_pos) {
@@ -124,13 +118,17 @@ static int parse_http_host_path_method(const unsigned char* payload,
         host_pos += 5;
     }
 
-    while (*host_pos == ' ' || *host_pos == '\t') host_pos++;
+    while ((size_t)(host_pos - payload) < payload_len &&
+           (*host_pos == ' ' || *host_pos == '\t')) {
+        host_pos++;
+    }
 
     const unsigned char* host_end =
         gg_memmem(host_pos,
                   (size_t)(payload + payload_len - host_pos),
                   (const unsigned char*)"\r\n",
                   2);
+
     if (!host_end) {
         snprintf(out_host, host_sz, "_missing_");
         return 1;
@@ -151,23 +149,39 @@ static void on_packet(u_char* user,
 {
     (void)user;
 
+    if (!hdr || !pkt) return;
     if (hdr->caplen < sizeof(struct ether_header)) return;
 
     const struct ether_header* eth = (const struct ether_header*)pkt;
     if (ntohs(eth->ether_type) != ETHERTYPE_IP) return;
 
-    const struct ip* ip = (const struct ip*)(pkt + sizeof(struct ether_header));
+    size_t l2_len = sizeof(struct ether_header);
+    if (hdr->caplen < l2_len + sizeof(struct ip)) return;
+
+    const struct ip* ip = (const struct ip*)(pkt + l2_len);
     if (ip->ip_p != IPPROTO_TCP) return;
 
     int ip_hdr_len = ip->ip_hl * 4;
+    if (ip_hdr_len < (int)sizeof(struct ip)) return;
+    if (hdr->caplen < l2_len + (size_t)ip_hdr_len) return;
+
+    int ip_total_len = ntohs(ip->ip_len);
+    if (ip_total_len < ip_hdr_len + (int)sizeof(struct tcphdr)) return;
+
+    if (hdr->caplen < l2_len + (size_t)ip_total_len) {
+        /* 캡처가 잘린 경우는 forged ack 계산 신뢰성이 낮으므로 스킵 */
+        return;
+    }
 
     const struct tcphdr* tcp =
         (const struct tcphdr*)((const unsigned char*)ip + ip_hdr_len);
 
     int tcp_hdr_len = tcp->th_off * 4;
+    if (tcp_hdr_len < (int)sizeof(struct tcphdr)) return;
+    if (ip_total_len < ip_hdr_len + tcp_hdr_len) return;
 
     const unsigned char* payload = (const unsigned char*)tcp + tcp_hdr_len;
-    int payload_len = (int)(hdr->caplen - (payload - pkt));
+    int payload_len = ip_total_len - ip_hdr_len - tcp_hdr_len;
     if (payload_len <= 0) return;
 
     if (!looks_like_http_request(payload, (size_t)payload_len)) return;
@@ -175,16 +189,14 @@ static void on_packet(u_char* user,
     HttpEvent ev;
     memset(&ev, 0, sizeof(ev));
 
-    /* 패킷 캡처 시각을 엔진 latency 계산 기준으로 사용 */
     ev.detect_ts_ms = (int64_t)hdr->ts.tv_sec * 1000 + (int64_t)hdr->ts.tv_usec / 1000;
     ev.is_http = 1;
 
     if (!parse_http_host_path_method(payload,
                                      (size_t)payload_len,
                                      ev.method, sizeof(ev.method),
-                                     ev.host,   sizeof(ev.host),
-                                     ev.path,   sizeof(ev.path)))
-    {
+                                     ev.host, sizeof(ev.host),
+                                     ev.path, sizeof(ev.path))) {
         return;
     }
 
@@ -198,6 +210,8 @@ static void on_packet(u_char* user,
 
     ev.meta.client_port = ntohs(tcp->th_sport);
     ev.meta.server_port = ntohs(tcp->th_dport);
+
+    /* seq/ack은 injector에서 host order로 사용 */
     ev.meta.seq = ntohl(tcp->th_seq);
     ev.meta.ack = ntohl(tcp->th_ack);
     ev.meta.tcp_flags = tcp->th_flags;
@@ -213,33 +227,60 @@ static void on_packet(u_char* user,
 int packet_extractor_run_pcap_loop(const char* ifname)
 {
     char errbuf[PCAP_ERRBUF_SIZE];
-
-    /* timeout 1000ms -> 100ms로 줄여 capture 지연 완화 */
-    pcap_t* p = pcap_open_live(ifname, 65535, 1, 100, errbuf);
-    if (!p)
-    {
-        printf("pcap_open_live failed: %s\n", errbuf);
-        return -1;
-    }
-
+    pcap_t* p = NULL;
     struct bpf_program fp;
-    if (pcap_compile(p, &fp, "tcp and (port 80 or port 8080 or port 18080)", 1, PCAP_NETMASK_UNKNOWN) != 0)
-    {
-        printf("pcap_compile failed\n");
+
+    p = pcap_create(ifname, errbuf);
+    if (!p) {
+        fprintf(stderr, "pcap_create failed: %s\n", errbuf);
+        return -1;
+    }
+
+    /* 즉시 전달 + 짧은 timeout으로 inject 지연 최소화 */
+    if (pcap_set_snaplen(p, 65535) != 0) goto fail;
+    if (pcap_set_promisc(p, 1) != 0) goto fail;
+    if (pcap_set_timeout(p, 10) != 0) goto fail;
+#ifdef PCAP_ERROR_ACTIVATED
+    if (pcap_set_immediate_mode(p, 1) != 0) goto fail;
+#endif
+
+    if (pcap_activate(p) != 0) {
+        fprintf(stderr, "pcap_activate failed: %s\n", pcap_geterr(p));
         pcap_close(p);
         return -1;
     }
 
-    if (pcap_setfilter(p, &fp) != 0)
-    {
-        printf("pcap_setfilter failed\n");
+    /*
+     * 요청 방향 위주로 좁힘
+     * - dst port 기준
+     * - HTTP 테스트 포트 포함
+     */
+    if (pcap_compile(p, &fp,
+                     "tcp dst port 80 or tcp dst port 8080 or tcp dst port 18080",
+                     1,
+                     PCAP_NETMASK_UNKNOWN) != 0) {
+        fprintf(stderr, "pcap_compile failed: %s\n", pcap_geterr(p));
         pcap_close(p);
         return -1;
     }
 
-    printf("sniffing on %s\n", ifname);
+    if (pcap_setfilter(p, &fp) != 0) {
+        fprintf(stderr, "pcap_setfilter failed: %s\n", pcap_geterr(p));
+        pcap_freecode(&fp);
+        pcap_close(p);
+        return -1;
+    }
+
+    pcap_freecode(&fp);
+
+    fprintf(stderr, "sniffing on %s\n", ifname);
     pcap_loop(p, -1, on_packet, NULL);
 
     pcap_close(p);
     return 0;
+
+fail:
+    fprintf(stderr, "pcap setup failed: %s\n", pcap_geterr(p));
+    if (p) pcap_close(p);
+    return -1;
 }

@@ -4,7 +4,7 @@ LDFLAGS := -L/usr/lib64/mysql
 LDLIBS := -lpcap -lmysqlclient -luuid -lcurl -lpthread
 
 TARGET := gateguard_engine
-INSTALL_PATH := /usr/local/bin/gg_engine
+INSTALL_PATH := /usr/local/bin/gateguard_engine
 SERVICE_NAME := gateguard-engine
 
 SRCS := \
